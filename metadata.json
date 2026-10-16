@@ -1,0 +1,6 @@
+{
+  "name": "AI SOC Alert Triage and Incident Response Platform",
+  "description": "Professional cybersecurity operations platform for alert triage, MITRE ATT&CK exploration, and incident response.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
