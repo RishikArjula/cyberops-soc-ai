@@ -13,19 +13,21 @@ export type ResponseActionType =
   | 'lock_account'
   | 'unlock_account'
   | 'revoke_token'
-  | 'collect_forensics';
+  | 'collect_forensics'
+  | 'platform_bootstrap'
+  | 'remediation_verified';
 
 export interface AuditLogEntry {
   id: string;
   timestamp: string;
   actorName: string;
-  actorRole: UserRole;
+  actorRole: UserRole | 'system';
   actionType: ResponseActionType;
   targetResource: string;
   justification: string;
-  status: 'SIMULATED_SUCCESS' | 'SIMULATED_FAILED' | 'PROPOSED';
+  status: 'SIMULATED_SUCCESS' | 'SIMULATED_FAILED' | 'PROPOSED' | 'SUCCESS' | 'FAILED';
   associatedAlertId?: string;
-  isSimulated: true; // Explicit flag confirming non-production simulated execution
+  isSimulated: boolean; // Explicit flag confirming whether execution is simulated or live
   systemNote: string;
 }
 

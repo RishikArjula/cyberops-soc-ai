@@ -5,9 +5,7 @@ import { SecurityAlert, AlertStatus } from './types/alert';
 import { MitreTactic, MitreTechnique, MitreMitigation, MitreDefenseCoverage } from './types/mitre';
 import { ResponseActionType, AuditLogEntry, IncidentTask } from './types/audit';
 
-import { LocalAlertRepository } from './repositories/local/LocalAlertRepository';
-import { LocalMITRERepository } from './repositories/local/LocalMITRERepository';
-import { LocalAuditLogRepository } from './repositories/local/LocalAuditLogRepository';
+import { getRepositories } from './repositories';
 import { DeterministicTriageService } from './services/deterministicTriageService';
 import { AuthorizationService } from './services/authorizationService';
 import { SAMPLE_NETWORK_FLOWS } from './data/networkFlows';
@@ -27,6 +25,10 @@ import { LoginPage } from './components/public/LoginPage';
 // Operational & Domain Components
 import { WorkspaceView } from './components/layout/AppSidebar';
 import { AlertTriageDashboard } from './components/analyst/AlertTriageDashboard';
+import { AnalystOverviewDashboard } from './components/analyst/AnalystOverviewDashboard';
+import { InvestigationWorkspace } from './components/analyst/InvestigationWorkspace';
+import { PlaybookConsole } from './components/analyst/PlaybookConsole';
+import { UserProfilePage } from './components/common/UserProfilePage';
 import { AlertDetailDrawer } from './components/analyst/AlertDetailDrawer';
 import { SimulateActionModal } from './components/analyst/SimulateActionModal';
 import { SecurityEngineerDashboard } from './components/security-engineer/SecurityEngineerDashboard';
@@ -35,30 +37,114 @@ import { PlatformAdminDashboard } from './components/admin/PlatformAdminDashboar
 import { AuditLogViewer } from './components/audit/AuditLogViewer';
 import { NetworkFlowViewer } from './components/network/NetworkFlowViewer';
 
-// Singleton service instances adhering to repository interfaces
-const alertRepo = new LocalAlertRepository();
-const mitreRepo = new LocalMITRERepository();
-const auditRepo = new LocalAuditLogRepository();
+// Repository bundle adhering to IAlertRepository, IMITRERepository, and IAuditLogRepository
+const { alertRepo, mitreRepo, auditRepo, isLive } = getRepositories();
 const triageService = new DeterministicTriageService();
 
-function AppContent() {
-  const { currentUser, isAuthenticated } = useAuth();
+const STORAGE_IN_WORKSPACE = 'cyberops_soc_in_workspace';
+const STORAGE_WORKSPACE_VIEW = 'cyberops_soc_workspace_view';
+const STORAGE_PUBLIC_ROUTE = 'cyberops_soc_public_route';
 
-  // Helper to determine initial public route from URL hash if present
-  const getInitialPublicRoute = (): PublicRoute => {
-    if (typeof window !== 'undefined') {
-      const hash = window.location.hash.replace('#', '') as PublicRoute;
-      if (['home', 'features', 'about', 'contact', 'login'].includes(hash)) {
-        return hash;
-      }
+const VALID_PUBLIC_ROUTES: PublicRoute[] = ['home', 'features', 'about', 'contact', 'login', 'register'];
+
+const VALID_WORKSPACE_VIEWS: WorkspaceView[] = [
+  'overview',
+  'alerts',
+  'investigations',
+  'playbooks',
+  'mitre',
+  'tasks',
+  'network',
+  'audit',
+  'admin',
+  'profile',
+];
+
+const parsePublicRouteFromHash = (hashStr: string): PublicRoute | null => {
+  if (!hashStr) return null;
+  const clean = hashStr.replace(/^#\/?/, '').toLowerCase().trim();
+  if (VALID_PUBLIC_ROUTES.includes(clean as PublicRoute)) {
+    return clean as PublicRoute;
+  }
+  return null;
+};
+
+const parseWorkspaceViewFromHash = (hashStr: string): WorkspaceView | null => {
+  if (!hashStr) return null;
+  const clean = hashStr.replace(/^#\/?/, '').toLowerCase().trim();
+  if (VALID_WORKSPACE_VIEWS.includes(clean as WorkspaceView)) {
+    return clean as WorkspaceView;
+  }
+  return null;
+};
+
+const getInitialInWorkspace = (): boolean => {
+  if (typeof window === 'undefined') return false;
+  const fromPublicHash = parsePublicRouteFromHash(window.location.hash);
+  if (fromPublicHash) {
+    return false;
+  }
+  const fromWorkspaceHash = parseWorkspaceViewFromHash(window.location.hash);
+  if (fromWorkspaceHash) {
+    return true;
+  }
+  try {
+    const savedPublic = sessionStorage.getItem(STORAGE_PUBLIC_ROUTE);
+    if (savedPublic && VALID_PUBLIC_ROUTES.includes(savedPublic as PublicRoute)) {
+      return false;
     }
-    return 'home';
-  };
+    return sessionStorage.getItem(STORAGE_IN_WORKSPACE) === 'true';
+  } catch {
+    return false;
+  }
+};
+
+const getInitialWorkspaceView = (): WorkspaceView => {
+  if (typeof window === 'undefined') return 'overview';
+  const fromHash = parseWorkspaceViewFromHash(window.location.hash);
+  if (fromHash) {
+    return fromHash;
+  }
+  const saved = sessionStorage.getItem(STORAGE_WORKSPACE_VIEW);
+  if (saved && VALID_WORKSPACE_VIEWS.includes(saved as WorkspaceView)) {
+    return saved as WorkspaceView;
+  }
+  return 'overview';
+};
+
+const getInitialPublicRoute = (): PublicRoute => {
+  if (typeof window !== 'undefined') {
+    // 1. URL hash is primary source of truth
+    const fromHash = parsePublicRouteFromHash(window.location.hash);
+    if (fromHash) {
+      try {
+        sessionStorage.setItem(STORAGE_PUBLIC_ROUTE, fromHash);
+      } catch {}
+      return fromHash;
+    }
+
+    // 2. Check sessionStorage fallback if hash was omitted or stripped on reload
+    try {
+      const saved = sessionStorage.getItem(STORAGE_PUBLIC_ROUTE);
+      if (saved && VALID_PUBLIC_ROUTES.includes(saved as PublicRoute)) {
+        if (window.location.hash !== `#${saved}`) {
+          window.history.replaceState({ route: saved }, '', `#${saved}`);
+        }
+        return saved as PublicRoute;
+      }
+    } catch {}
+  }
+  return 'home';
+};
+
+function AppContent() {
+  const { currentUser, isAuthenticated, isAuthReady, logout } = useAuth();
 
   // Navigation states
-  const [inWorkspace, setInWorkspace] = useState(false);
+  const [inWorkspace, setInWorkspace] = useState<boolean>(getInitialInWorkspace);
   const [publicRoute, setPublicRoute] = useState<PublicRoute>(getInitialPublicRoute);
-  const [workspaceView, setWorkspaceView] = useState<WorkspaceView>('alerts');
+  const [workspaceView, setWorkspaceView] = useState<WorkspaceView>(getInitialWorkspaceView);
+  const [auditFilterAlertId, setAuditFilterAlertId] = useState<string | undefined>(undefined);
 
   // Application Data State
   const [alerts, setAlerts] = useState<SecurityAlert[]>([]);
@@ -125,16 +211,20 @@ function AppContent() {
           setAuditLogs(fetchedLogs);
         }
       } else {
-        // Default preview data for unauthenticated visitors
-        const defaultAlerts = await alertRepo.getAlertsForUser({
-          id: 'anon',
-          name: 'Anonymous',
-          email: 'anon@guest',
-          role: 'soc_analyst',
-          callsign: 'GUEST',
-          title: 'Guest Visitor',
-        });
-        setAlerts(defaultAlerts);
+        // Default preview data for unauthenticated visitors in development/demo mode
+        if (isLive) {
+          setAlerts([]);
+        } else {
+          const defaultAlerts = await alertRepo.getAlertsForUser({
+            id: 'anon',
+            name: 'Anonymous',
+            email: 'anon@guest',
+            role: 'soc_analyst',
+            callsign: 'GUEST',
+            title: 'Guest Visitor',
+          });
+          setAlerts(defaultAlerts);
+        }
       }
     } finally {
       setIsLoading(false);
@@ -145,14 +235,123 @@ function AppContent() {
     loadData();
   }, [loadData]);
 
+  // Explicit check ensuring only approved operators with assigned non-null roles can enter workspace
+  const isApprovedOperator =
+    currentUser?.accountStatus === 'approved' &&
+    Boolean(currentUser.role) &&
+    ['soc_analyst', 'security_engineer', 'it_operations', 'super_admin'].includes(currentUser.role);
+
   // Enforce role-to-view authorization when role changes or if current view is unauthorized
   useEffect(() => {
     if (currentUser) {
       if (!AuthorizationService.isViewAuthorized(currentUser.role, workspaceView)) {
-        setWorkspaceView(AuthorizationService.getDefaultViewForRole(currentUser.role) as WorkspaceView);
+        const defaultView = AuthorizationService.getDefaultViewForRole(currentUser.role) as WorkspaceView;
+        setWorkspaceView(defaultView);
+        try {
+          sessionStorage.setItem(STORAGE_WORKSPACE_VIEW, defaultView);
+        } catch {}
       }
     }
   }, [currentUser?.role, workspaceView]);
+
+  // Restore authorized workspace or fail closed once authentication and profile readiness resolve
+  useEffect(() => {
+    if (!isAuthReady) return;
+
+    if (isAuthenticated && currentUser && isApprovedOperator) {
+      const fromPublicHash =
+        typeof window !== 'undefined' ? parsePublicRouteFromHash(window.location.hash) : null;
+      const fromWorkspaceHash =
+        typeof window !== 'undefined' ? parseWorkspaceViewFromHash(window.location.hash) : null;
+      let savedPublic: string | null = null;
+      try {
+        savedPublic = typeof window !== 'undefined' ? sessionStorage.getItem(STORAGE_PUBLIC_ROUTE) : null;
+      } catch {}
+      const wasInWorkspace =
+        typeof window !== 'undefined' &&
+        sessionStorage.getItem(STORAGE_IN_WORKSPACE) === 'true';
+
+      if (fromPublicHash) {
+        setInWorkspace(false);
+        setPublicRoute(fromPublicHash);
+      } else if (fromWorkspaceHash) {
+        setInWorkspace(true);
+        if (AuthorizationService.isViewAuthorized(currentUser.role, fromWorkspaceHash)) {
+          setWorkspaceView(fromWorkspaceHash);
+          try {
+            sessionStorage.setItem(STORAGE_IN_WORKSPACE, 'true');
+            sessionStorage.setItem(STORAGE_WORKSPACE_VIEW, fromWorkspaceHash);
+          } catch {}
+        } else {
+          // Direct URL to unauthorized view: redirect to role's authorized default view
+          const defaultView = AuthorizationService.getDefaultViewForRole(currentUser.role) as WorkspaceView;
+          setWorkspaceView(defaultView);
+          try {
+            sessionStorage.setItem(STORAGE_IN_WORKSPACE, 'true');
+            sessionStorage.setItem(STORAGE_WORKSPACE_VIEW, defaultView);
+          } catch {}
+          if (typeof window !== 'undefined') {
+            window.history.replaceState({ view: defaultView }, '', `#${defaultView}`);
+          }
+        }
+      } else if (wasInWorkspace && !savedPublic) {
+        setInWorkspace(true);
+        const savedView =
+          typeof window !== 'undefined'
+            ? (sessionStorage.getItem(STORAGE_WORKSPACE_VIEW) as WorkspaceView | null)
+            : null;
+        if (savedView && AuthorizationService.isViewAuthorized(currentUser.role, savedView)) {
+          setWorkspaceView(savedView);
+          if (typeof window !== 'undefined' && window.location.hash !== `#${savedView}`) {
+            window.history.replaceState({ view: savedView }, '', `#${savedView}`);
+          }
+        } else {
+          const defaultView = AuthorizationService.getDefaultViewForRole(currentUser.role) as WorkspaceView;
+          setWorkspaceView(defaultView);
+          try {
+            sessionStorage.setItem(STORAGE_WORKSPACE_VIEW, defaultView);
+          } catch {}
+          if (typeof window !== 'undefined' && window.location.hash !== `#${defaultView}`) {
+            window.history.replaceState({ view: defaultView }, '', `#${defaultView}`);
+          }
+        }
+      } else {
+        setInWorkspace(false);
+      }
+    } else {
+      // Fail closed: clear workspace persistence if unauthenticated, pending, rejected, or invalid role
+      if (typeof window !== 'undefined' && sessionStorage.getItem(STORAGE_IN_WORKSPACE)) {
+        try {
+          sessionStorage.removeItem(STORAGE_IN_WORKSPACE);
+          sessionStorage.removeItem(STORAGE_WORKSPACE_VIEW);
+        } catch {}
+      }
+      setInWorkspace(false);
+
+      // If user attempted to reach a workspace hash while unauthenticated, redirect to login
+      if (typeof window !== 'undefined') {
+        const fromWorkspaceHash = parseWorkspaceViewFromHash(window.location.hash);
+        if (fromWorkspaceHash) {
+          setPublicRoute('login');
+          try {
+            sessionStorage.setItem(STORAGE_PUBLIC_ROUTE, 'login');
+          } catch {}
+          window.history.replaceState({ route: 'login' }, '', '#login');
+        }
+      }
+    }
+  }, [isAuthReady, isAuthenticated, currentUser, isApprovedOperator]);
+
+  // Persist authorized workspace view changes
+  useEffect(() => {
+    if (inWorkspace && isApprovedOperator && currentUser) {
+      if (AuthorizationService.isViewAuthorized(currentUser.role, workspaceView)) {
+        try {
+          sessionStorage.setItem(STORAGE_WORKSPACE_VIEW, workspaceView);
+        } catch {}
+      }
+    }
+  }, [inWorkspace, isApprovedOperator, currentUser, workspaceView]);
 
   // Alert operations with strict permission enforcement
   const handleUpdateAlertStatus = async (alertId: string, status: AlertStatus) => {
@@ -244,6 +443,15 @@ function AppContent() {
     if (!currentUser) return;
     const updated = await auditRepo.updateTaskStatus(currentUser, taskId, status, notes);
     setTasks((prev) => prev.map((t) => (t.id === taskId ? updated : t)));
+    // Refresh audit logs so newly emitted operational remediation_verified audit event immediately syncs in state
+    if (status === 'completed') {
+      try {
+        const refreshedLogs = await auditRepo.getLogsForUser(currentUser);
+        setAuditLogs(refreshedLogs);
+      } catch (err) {
+        console.error('Failed to reload audit logs after task completion:', err);
+      }
+    }
   };
 
   // Selected Alert Computations
@@ -274,6 +482,12 @@ function AppContent() {
   // Unified public navigation handler with immediate scroll-to-top and browser history sync
   const handlePublicNavigate = useCallback((route: PublicRoute) => {
     setPublicRoute(route);
+    try {
+      sessionStorage.setItem(STORAGE_PUBLIC_ROUTE, route);
+    } catch {}
+    if (['home', 'features', 'about', 'contact', 'login', 'register'].includes(route)) {
+      setInWorkspace(false);
+    }
     if (typeof window !== 'undefined') {
       if (window.location.hash !== `#${route}`) {
         window.history.pushState({ route }, '', `#${route}`);
@@ -288,11 +502,67 @@ function AppContent() {
   useEffect(() => {
     const handleUrlChange = () => {
       if (typeof window === 'undefined') return;
-      const hash = window.location.hash.replace('#', '') as PublicRoute;
-      if (['home', 'features', 'about', 'contact', 'login'].includes(hash)) {
-        setPublicRoute(hash);
+      const rawHash = window.location.hash;
+      const publicRouteFromHash = parsePublicRouteFromHash(rawHash);
+      const workspaceViewFromHash = parseWorkspaceViewFromHash(rawHash);
+
+      if (publicRouteFromHash) {
+        setPublicRoute(publicRouteFromHash);
+        try {
+          sessionStorage.setItem(STORAGE_PUBLIC_ROUTE, publicRouteFromHash);
+          sessionStorage.removeItem(STORAGE_IN_WORKSPACE);
+        } catch {}
+        setInWorkspace(false);
+      } else if (workspaceViewFromHash) {
+        if (isAuthenticated && currentUser && isApprovedOperator) {
+          if (AuthorizationService.isViewAuthorized(currentUser.role, workspaceViewFromHash)) {
+            setInWorkspace(true);
+            setWorkspaceView(workspaceViewFromHash);
+            try {
+              sessionStorage.setItem(STORAGE_IN_WORKSPACE, 'true');
+              sessionStorage.setItem(STORAGE_WORKSPACE_VIEW, workspaceViewFromHash);
+              sessionStorage.removeItem(STORAGE_PUBLIC_ROUTE);
+            } catch {}
+          } else {
+            // Direct URL to unauthorized view: redirect to authorized default view
+            const defView = AuthorizationService.getDefaultViewForRole(currentUser.role) as WorkspaceView;
+            setInWorkspace(true);
+            setWorkspaceView(defView);
+            try {
+              sessionStorage.setItem(STORAGE_IN_WORKSPACE, 'true');
+              sessionStorage.setItem(STORAGE_WORKSPACE_VIEW, defView);
+            } catch {}
+            window.history.replaceState({ view: defView }, '', `#${defView}`);
+          }
+        } else {
+          // Unauthenticated or unapproved: fail closed to login
+          setInWorkspace(false);
+          setPublicRoute('login');
+          try {
+            sessionStorage.setItem(STORAGE_PUBLIC_ROUTE, 'login');
+          } catch {}
+          window.history.replaceState({ route: 'login' }, '', '#login');
+        }
+      } else if (rawHash && rawHash !== '#' && rawHash !== '') {
+        // Unknown hash route handling
+        if (isAuthenticated && currentUser && isApprovedOperator) {
+          const defView = AuthorizationService.getDefaultViewForRole(currentUser.role) as WorkspaceView;
+          setInWorkspace(true);
+          setWorkspaceView(defView);
+          window.history.replaceState({ view: defView }, '', `#${defView}`);
+        } else {
+          setInWorkspace(false);
+          setPublicRoute('home');
+          window.history.replaceState({ route: 'home' }, '', '#home');
+        }
       } else {
-        setPublicRoute('home');
+        const wasInWorkspace = sessionStorage.getItem(STORAGE_IN_WORKSPACE) === 'true';
+        if (wasInWorkspace && isAuthenticated && currentUser && isApprovedOperator) {
+          setInWorkspace(true);
+        } else {
+          setInWorkspace(false);
+          setPublicRoute('home');
+        }
       }
       window.scrollTo({ top: 0, left: 0, behavior: 'instant' });
       if (document.documentElement) document.documentElement.scrollTop = 0;
@@ -305,7 +575,7 @@ function AppContent() {
       window.removeEventListener('popstate', handleUrlChange);
       window.removeEventListener('hashchange', handleUrlChange);
     };
-  }, []);
+  }, [isAuthenticated, currentUser, isApprovedOperator]);
 
   // Ensure scroll position resets whenever publicRoute or inWorkspace transitions
   useEffect(() => {
@@ -318,26 +588,95 @@ function AppContent() {
 
   // Navigate to workspace on login success
   const handleLoginSuccess = () => {
+    try {
+      sessionStorage.setItem(STORAGE_IN_WORKSPACE, 'true');
+      sessionStorage.removeItem(STORAGE_PUBLIC_ROUTE);
+    } catch {
+      // Ignore storage errors in restricted contexts
+    }
     setInWorkspace(true);
     if (typeof window !== 'undefined') {
+      const fromWorkspaceHash = parseWorkspaceViewFromHash(window.location.hash);
+      const targetView = (
+        fromWorkspaceHash && currentUser && AuthorizationService.isViewAuthorized(currentUser.role, fromWorkspaceHash)
+          ? fromWorkspaceHash
+          : currentUser
+          ? AuthorizationService.getDefaultViewForRole(currentUser.role)
+          : 'overview'
+      ) as WorkspaceView;
+      setWorkspaceView(targetView);
+      window.history.replaceState({ view: targetView }, '', `#${targetView}`);
       window.scrollTo({ top: 0, left: 0, behavior: 'instant' });
     }
   };
 
   const handleEnterWorkspace = () => {
+    try {
+      sessionStorage.setItem(STORAGE_IN_WORKSPACE, 'true');
+      sessionStorage.removeItem(STORAGE_PUBLIC_ROUTE);
+    } catch {
+      // Ignore storage errors in restricted contexts
+    }
     setInWorkspace(true);
     if (typeof window !== 'undefined') {
+      const fromWorkspaceHash = parseWorkspaceViewFromHash(window.location.hash);
+      const targetView = (
+        fromWorkspaceHash && currentUser && AuthorizationService.isViewAuthorized(currentUser.role, fromWorkspaceHash)
+          ? fromWorkspaceHash
+          : currentUser
+          ? AuthorizationService.getDefaultViewForRole(currentUser.role)
+          : 'overview'
+      ) as WorkspaceView;
+      setWorkspaceView(targetView);
+      window.history.replaceState({ view: targetView }, '', `#${targetView}`);
       window.scrollTo({ top: 0, left: 0, behavior: 'instant' });
     }
   };
 
   const handleExitToPublic = () => {
+    try {
+      sessionStorage.removeItem(STORAGE_IN_WORKSPACE);
+      sessionStorage.removeItem(STORAGE_WORKSPACE_VIEW);
+      sessionStorage.setItem(STORAGE_PUBLIC_ROUTE, 'home');
+    } catch {
+      // Ignore storage errors in restricted contexts
+    }
     setInWorkspace(false);
     handlePublicNavigate('home');
   };
 
-  // If in Workspace and authenticated:
-  if (inWorkspace && isAuthenticated && currentUser) {
+  const wasInWorkspace =
+    typeof window !== 'undefined' &&
+    sessionStorage.getItem(STORAGE_IN_WORKSPACE) === 'true';
+  const fromHash =
+    typeof window !== 'undefined' ? parsePublicRouteFromHash(window.location.hash) : null;
+  let savedPublic: string | null = null;
+  try {
+    savedPublic = typeof window !== 'undefined' ? sessionStorage.getItem(STORAGE_PUBLIC_ROUTE) : null;
+  } catch {}
+  const isViewingPublic = Boolean(
+    fromHash || (savedPublic && VALID_PUBLIC_ROUTES.includes(savedPublic as PublicRoute))
+  );
+
+  // Prevent public-homepage flash while verifying live session and profile authorization
+  if (!isAuthReady && wasInWorkspace && !isViewingPublic) {
+    return (
+      <div className="min-h-screen bg-slate-950 flex flex-col items-center justify-center text-slate-200">
+        <div className="flex items-center space-x-3 mb-4">
+          <div className="w-4 h-4 rounded-full bg-cyan-500 animate-ping" />
+          <span className="font-mono text-sm tracking-wider uppercase text-cyan-400">
+            Restoring CyberOps SOC Session...
+          </span>
+        </div>
+        <p className="text-xs text-slate-500 font-mono">
+          Verifying cryptographic credentials and operational clearance...
+        </p>
+      </div>
+    );
+  }
+
+  // If in Workspace and authenticated with approved role:
+  if (inWorkspace && isAuthenticated && currentUser && isApprovedOperator) {
     // Explicit Role-to-View Authorization Guard:
     // Unauthorized views must NEVER render merely because workspaceView was manipulated.
     const isAuthorized = AuthorizationService.isViewAuthorized(currentUser.role, workspaceView);
@@ -354,17 +693,46 @@ function AppContent() {
         onViewChange={(newView) => {
           if (AuthorizationService.isViewAuthorized(currentUser.role, newView)) {
             setWorkspaceView(newView);
+            try {
+              sessionStorage.setItem(STORAGE_WORKSPACE_VIEW, newView);
+            } catch {}
+            if (typeof window !== 'undefined' && window.location.hash !== `#${newView}`) {
+              window.history.pushState({ view: newView }, '', `#${newView}`);
+            }
           } else {
-            setWorkspaceView(AuthorizationService.getDefaultViewForRole(currentUser.role) as WorkspaceView);
+            const defView = AuthorizationService.getDefaultViewForRole(currentUser.role) as WorkspaceView;
+            setWorkspaceView(defView);
+            try {
+              sessionStorage.setItem(STORAGE_WORKSPACE_VIEW, defView);
+            } catch {}
+            if (typeof window !== 'undefined' && window.location.hash !== `#${defView}`) {
+              window.history.replaceState({ view: defView }, '', `#${defView}`);
+            }
           }
         }}
         alertCount={alerts.length}
         criticalCount={criticalAlertCount}
         taskCount={tasks.filter((t) => t.status !== 'completed').length}
         onExitToPublic={handleExitToPublic}
+        selectedAlertId={selectedAlert?.id}
       >
         {effectiveView === 'admin' && currentUser.role === 'super_admin' && (
           <PlatformAdminDashboard currentUser={currentUser} />
+        )}
+
+        {effectiveView === 'overview' && AuthorizationService.isViewAuthorized(currentUser.role, 'overview') && (
+          <AnalystOverviewDashboard
+            alerts={alerts}
+            tactics={tactics}
+            techniques={techniques}
+            onNavigateToQueue={() => setWorkspaceView('alerts')}
+            onSelectAlertForInvestigation={(alert) => {
+              setSelectedAlert(alert);
+              setWorkspaceView('investigations');
+            }}
+            onRefresh={loadData}
+            isLoading={isLoading}
+          />
         )}
 
         {effectiveView === 'alerts' && AuthorizationService.isViewAuthorized(currentUser.role, 'alerts') && (
@@ -372,8 +740,90 @@ function AppContent() {
             alerts={alerts}
             tactics={tactics}
             onSelectAlert={(a) => setSelectedAlert(a)}
+            onInvestigateAlert={(a) => {
+              setSelectedAlert(a);
+              setWorkspaceView('investigations');
+            }}
             onRefresh={loadData}
+            isLoading={isLoading}
             selectedAlertId={selectedAlert?.id}
+            currentUser={currentUser}
+            onUpdateAlertStatus={handleUpdateAlertStatus}
+          />
+        )}
+
+        {effectiveView === 'investigations' && AuthorizationService.isViewAuthorized(currentUser.role, 'investigations') && (
+          <InvestigationWorkspace
+            alerts={alerts}
+            selectedAlertId={selectedAlert?.id}
+            onSelectAlert={(a) => setSelectedAlert(a)}
+            onUpdateStatus={handleUpdateAlertStatus}
+            onAddNote={handleAddAnalystNote}
+            techniques={techniques}
+            mitigations={mitigations}
+            triageEvaluator={(a) => triageService.evaluateAlert(a)}
+            currentRole={currentUser.role}
+            onInitiateSimulatedAction={(action, target, alertId) =>
+              handleInitiateSimulatedAction(action, target, alertId)
+            }
+            onNavigateToAlertQueue={() => setWorkspaceView('alerts')}
+            onNavigateToAuditTrail={(alertId) => {
+              setAuditFilterAlertId(alertId);
+              setWorkspaceView('audit');
+            }}
+            onNavigateToPlaybooks={(alertId) => {
+              if (alertId) {
+                const matchedAlert = alerts.find((a) => a.id === alertId);
+                if (matchedAlert) {
+                  setSelectedAlert(matchedAlert);
+                }
+              }
+              setWorkspaceView('playbooks');
+            }}
+          />
+        )}
+
+        {effectiveView === 'playbooks' && AuthorizationService.isViewAuthorized(currentUser.role, 'playbooks') && (
+          <PlaybookConsole
+            alerts={alerts}
+            currentRole={currentUser.role}
+            selectedAlertId={selectedAlert?.id}
+            onExecuteSimulation={async (actionType, target, justification, alertId) => {
+              const newEntry = await auditRepo.recordSimulatedAction(currentUser, {
+                actionType,
+                targetResource: target,
+                justification,
+                status: 'SIMULATED_SUCCESS',
+                associatedAlertId: alertId,
+                systemNote: `Simulated containment executed under Phase 1 protocol for target ${target}.`,
+              });
+              setAuditLogs((prev) => [newEntry, ...prev]);
+
+              if (actionType === 'isolate_host' || actionType === 'lock_account') {
+                const newTask = await auditRepo.createTask(currentUser, {
+                  title: `Verify Containment & Recovery for ${target}`,
+                  description: `Operational task triggered following ${actionType.replace('_', ' ')}. Rationale: ${justification}`,
+                  assignedRole: 'it_operations',
+                  status: 'in_progress',
+                  priority: 'high',
+                  targetAsset: target,
+                  suggestedActionType: actionType,
+                  associatedAlertId: alertId,
+                });
+                setTasks((prev) => [newTask, ...prev]);
+              }
+            }}
+            onNavigateToAuditTrail={(alertId) => {
+              setAuditFilterAlertId(alertId);
+              setWorkspaceView('audit');
+            }}
+          />
+        )}
+
+        {effectiveView === 'profile' && AuthorizationService.isViewAuthorized(currentUser.role, 'profile') && (
+          <UserProfilePage
+            currentUser={currentUser}
+            onLogout={logout}
           />
         )}
 
@@ -383,18 +833,23 @@ function AppContent() {
             techniques={techniques}
             mitigations={mitigations}
             coverage={coverage}
+            isLoading={isLoading}
+            onRefresh={loadData}
           />
         )}
 
         {effectiveView === 'tasks' && AuthorizationService.isViewAuthorized(currentUser.role, 'tasks') && (
           <ITOperationsDashboard
             tasks={tasks}
+            alerts={alerts}
+            auditLogs={auditLogs}
             onUpdateTaskStatus={handleUpdateTaskStatus}
             onTriggerSimulatedAction={(action, target) =>
               handleInitiateSimulatedAction(action, target)
             }
             onInspectAlert={handleInspectAlert}
             currentRole={currentUser.role}
+            currentUser={currentUser}
           />
         )}
 
@@ -403,7 +858,7 @@ function AppContent() {
         )}
 
         {effectiveView === 'audit' && AuthorizationService.isViewAuthorized(currentUser.role, 'audit') && (
-          <AuditLogViewer logs={auditLogs} />
+          <AuditLogViewer logs={auditLogs} initialAlertFilter={auditFilterAlertId} currentUser={currentUser} />
         )}
 
         {/* Deep-dive Investigation Drawer */}
@@ -464,8 +919,12 @@ function AppContent() {
 
       {publicRoute === 'contact' && <ContactPage />}
 
-      {publicRoute === 'login' && (
-        <LoginPage onLoginSuccess={handleLoginSuccess} />
+      {(publicRoute === 'login' || publicRoute === 'register') && (
+        <LoginPage
+          initialMode={publicRoute === 'register' ? 'register' : 'signin'}
+          onLoginSuccess={handleLoginSuccess}
+          onNavigate={handlePublicNavigate}
+        />
       )}
     </PublicLayout>
   );

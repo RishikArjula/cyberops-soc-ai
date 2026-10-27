@@ -2,10 +2,15 @@ import React, { useState } from 'react';
 import { UserCheck, ChevronUp, ChevronDown, AlertTriangle, ShieldAlert } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
 import { UserRole, ROLE_METADATA } from '../../types/auth';
+import { isSupabaseConfigured } from '../../lib/supabaseClient';
 
 export const DevRoleSimulator: React.FC = () => {
   const { currentUser, switchRoleDemo } = useAuth();
   const [expanded, setExpanded] = useState(false);
+
+  // In live Supabase mode, all authorization derives from PostgreSQL user_profiles.
+  // DevRoleSimulator must NEVER override or simulate a live authenticated role.
+  if (isSupabaseConfigured()) return null;
 
   // Safeguard: Restrict role simulator to development builds or explicit evaluation flag
   const isDev = Boolean(import.meta.env?.DEV);
@@ -18,7 +23,7 @@ export const DevRoleSimulator: React.FC = () => {
   if (!currentUser || (!isDev && !isEvalMode)) return null;
 
   return (
-    <div className="fixed bottom-3 right-3 z-50 font-mono text-xs select-none">
+    <div className="fixed bottom-3 left-3 z-50 font-mono text-xs select-none">
       <div className="bg-white dark:bg-slate-900 border border-purple-300 dark:border-purple-800/80 rounded-lg shadow-2xl overflow-hidden max-w-xs">
         {/* Header Toggle */}
         <button

@@ -1,15 +1,70 @@
 import React, { useState } from 'react';
 import { AuditLogEntry, ResponseActionType } from '../../types/audit';
+import { UserProfile } from '../../types/auth';
 import { ProvenanceBadge } from '../common/ProvenanceBadge';
-import { FileText, ShieldCheck, Search, Filter } from 'lucide-react';
+import { FileText, ShieldCheck, Search, Filter, Database, Download, FileDown } from 'lucide-react';
+import { AuditExportService } from '../../services/auditExportService';
+import { AuthorizationService } from '../../services/authorizationService';
+import { getRepositories } from '../../repositories';
 
-interface AuditLogViewerProps {
+export interface AuditLogViewerProps {
   logs: AuditLogEntry[];
+  initialAlertFilter?: string;
+  currentUser?: UserProfile;
+  isLiveDatabase?: boolean;
 }
 
-export const AuditLogViewer: React.FC<AuditLogViewerProps> = ({ logs }) => {
-  const [search, setSearch] = useState('');
+const ACTION_LABELS: Record<string, string> = {
+  isolate_host: 'Endpoint Isolation',
+  unisolate_host: 'Host Reconnection',
+  block_ip: 'IP Egress Block',
+  unblock_ip: 'IP Unblock',
+  lock_account: 'Account Lockout / Reject / Suspend',
+  unlock_account: 'Account Approval / Reactivate',
+  revoke_token: 'Session Token Revocation',
+  platform_bootstrap: 'Platform Bootstrap',
+  INITIALIZE_BOOTSTRAP_STATE: 'Bootstrap Init',
+  collect_forensics: 'Forensics Package',
+  remediation_verified: 'Remediation Verified',
+};
+
+function formatActionType(action: string): string {
+  return ACTION_LABELS[action] || action.replace(/_/g, ' ');
+}
+
+export const AuditLogViewer: React.FC<AuditLogViewerProps> = ({
+  logs,
+  initialAlertFilter,
+  currentUser,
+  isLiveDatabase,
+}) => {
+  const [search, setSearch] = useState(initialAlertFilter || '');
   const [selectedAction, setSelectedAction] = useState<string>('all');
+  const [isExporting, setIsExporting] = useState<'csv' | 'json' | null>(null);
+  const [exportFeedback, setExportFeedback] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
+
+  const isSuperAdmin = currentUser ? AuthorizationService.canExportAuditLogs(currentUser.role) : false;
+
+  const handleExport = (format: 'csv' | 'json') => {
+    if (!currentUser) return;
+    setExportFeedback(null);
+    setIsExporting(format);
+
+    try {
+      const result = AuditExportService.downloadExport(filteredLogs, currentUser, format);
+      setExportFeedback({
+        type: 'success',
+        message: `Successfully generated and downloaded ${result.filename} (${result.rowCount} record${result.rowCount === 1 ? '' : 's'}).`,
+      });
+    } catch (err: any) {
+      setExportFeedback({
+        type: 'error',
+        message: err.message || 'Export failed due to an authorization or processing error.',
+      });
+    } finally {
+      setIsExporting(null);
+    }
+  };
 
   const filteredLogs = logs.filter((log) => {
     if (selectedAction !== 'all' && log.actionType !== selectedAction) return false;
@@ -19,11 +74,25 @@ export const AuditLogViewer: React.FC<AuditLogViewerProps> = ({ logs }) => {
         log.id.toLowerCase().includes(q) ||
         log.targetResource.toLowerCase().includes(q) ||
         log.actorName.toLowerCase().includes(q) ||
-        log.justification.toLowerCase().includes(q)
+        log.justification.toLowerCase().includes(q) ||
+        (log.associatedAlertId && log.associatedAlertId.toLowerCase().includes(q))
       );
     }
     return true;
   });
+
+  const isLive =
+    isLiveDatabase !== undefined
+      ? isLiveDatabase
+      : (() => {
+          try {
+            return getRepositories().isLive;
+          } catch {
+            return false;
+          }
+        })();
+
+  const hasNonSimulatedLogs = logs.some((l) => !l.isSimulated);
 
   return (
     <div className="space-y-4">
@@ -33,15 +102,71 @@ export const AuditLogViewer: React.FC<AuditLogViewerProps> = ({ logs }) => {
           <div className="flex items-center gap-2">
             <h1 className="text-xl font-bold text-slate-100 flex items-center gap-2">
               <FileText className="w-5 h-5 text-purple-400" />
-              Containment Action Audit Trail
+              Containment & Governance Audit Trail
             </h1>
-            <ProvenanceBadge type="synthetic_demo" label="SIMULATED AUDIT" />
+            {isLive && hasNonSimulatedLogs ? (
+              <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-mono tracking-wide bg-emerald-50 text-emerald-700 border border-emerald-200 dark:bg-emerald-950/70 dark:text-emerald-300 dark:border-emerald-800/80">
+                <Database className="w-3 h-3 text-emerald-600 dark:text-emerald-400" />
+                <span>POSTGRESQL AUDIT</span>
+              </span>
+            ) : !isLive && hasNonSimulatedLogs ? (
+              <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-mono tracking-wide bg-purple-50 text-purple-700 border border-purple-200 dark:bg-purple-950/70 dark:text-purple-300 dark:border-purple-800/80">
+                <FileText className="w-3 h-3 text-purple-600 dark:text-purple-400" />
+                <span>LOCAL GOVERNANCE AUDIT</span>
+              </span>
+            ) : (
+              <ProvenanceBadge type="synthetic_demo" label="SIMULATED AUDIT" />
+            )}
           </div>
           <p className="text-xs text-slate-400 mt-0.5">
-            Tamper-evident record of all simulated containment, isolation, and remediation procedures.
+            Tamper-evident, append-only record of platform governance and operational containment procedures.
           </p>
         </div>
+
+        {/* Super Admin Accessible Export Controls */}
+        {isSuperAdmin && (
+          <div className="flex items-center gap-2 shrink-0">
+            <button
+              onClick={() => handleExport('csv')}
+              disabled={isExporting !== null}
+              aria-label="Export audit logs as CSV"
+              className="px-2.5 py-1.5 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 hover:bg-slate-100 dark:hover:bg-slate-700 text-slate-800 dark:text-slate-200 text-xs font-mono font-medium flex items-center gap-1.5 transition cursor-pointer disabled:opacity-50 shadow-xs"
+            >
+              <Download className="w-3.5 h-3.5 text-purple-600 dark:text-purple-400" />
+              <span>{isExporting === 'csv' ? 'Exporting...' : 'Export CSV'}</span>
+            </button>
+            <button
+              onClick={() => handleExport('json')}
+              disabled={isExporting !== null}
+              aria-label="Export audit logs as JSON"
+              className="px-2.5 py-1.5 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 hover:bg-slate-100 dark:hover:bg-slate-700 text-slate-800 dark:text-slate-200 text-xs font-mono font-medium flex items-center gap-1.5 transition cursor-pointer disabled:opacity-50 shadow-xs"
+            >
+              <FileDown className="w-3.5 h-3.5 text-purple-600 dark:text-purple-400" />
+              <span>{isExporting === 'json' ? 'Exporting...' : 'Export JSON'}</span>
+            </button>
+          </div>
+        )}
       </div>
+
+      {/* Export Status Feedback */}
+      {exportFeedback && (
+        <div
+          role="status"
+          className={`p-3 text-xs rounded-lg border flex items-center justify-between ${
+            exportFeedback.type === 'success'
+              ? 'bg-emerald-50 text-emerald-800 border-emerald-200 dark:bg-emerald-950/60 dark:text-emerald-300 dark:border-emerald-900/60'
+              : 'bg-rose-50 text-rose-800 border-rose-200 dark:bg-rose-950/60 dark:text-rose-300 dark:border-rose-900/60'
+          }`}
+        >
+          <span>{exportFeedback.message}</span>
+          <button
+            onClick={() => setExportFeedback(null)}
+            className="text-[11px] font-mono underline ml-3 cursor-pointer"
+          >
+            Dismiss
+          </button>
+        </div>
+      )}
 
       {/* Filter Toolbar */}
       <div className="p-3 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-lg flex flex-col sm:flex-row gap-2 shadow-xs">
@@ -65,8 +190,12 @@ export const AuditLogViewer: React.FC<AuditLogViewerProps> = ({ logs }) => {
           <option value="all">All Actions</option>
           <option value="isolate_host">Endpoint Isolation</option>
           <option value="block_ip">IP Egress Block</option>
-          <option value="lock_account">Account Lockout</option>
+          <option value="lock_account">Account Lockout / Reject</option>
+          <option value="unlock_account">Account Approval / Unlock</option>
+          <option value="platform_bootstrap">Platform Bootstrap</option>
+          <option value="INITIALIZE_BOOTSTRAP_STATE">Bootstrap Init</option>
           <option value="collect_forensics">Forensics Package</option>
+          <option value="remediation_verified">Remediation Verified</option>
         </select>
       </div>
 
@@ -89,7 +218,7 @@ export const AuditLogViewer: React.FC<AuditLogViewerProps> = ({ logs }) => {
               {filteredLogs.length === 0 ? (
                 <tr>
                   <td colSpan={7} className="py-8 text-center text-slate-500 italic text-xs">
-                    No simulated action audit records found.
+                    No audit records found.
                   </td>
                 </tr>
               ) : (
@@ -101,18 +230,33 @@ export const AuditLogViewer: React.FC<AuditLogViewerProps> = ({ logs }) => {
                     </td>
                     <td className="py-3 px-3 font-mono">
                       <span className="px-2 py-0.5 rounded bg-purple-50 dark:bg-purple-950/80 text-purple-700 dark:text-purple-300 border border-purple-200 dark:border-purple-800 text-[10px] uppercase font-bold">
-                        {log.actionType.replace('_', ' ')}
+                        {formatActionType(log.actionType)}
                       </span>
                     </td>
-                    <td className="py-3 px-3 font-mono text-blue-600 dark:text-cyan-300 font-semibold">{log.targetResource}</td>
+                    <td className="py-3 px-3 font-mono">
+                      <div className="text-blue-600 dark:text-cyan-300 font-semibold">{log.targetResource}</div>
+                      {log.associatedAlertId && (
+                        <div className="text-[10px] text-slate-500 dark:text-slate-400">
+                          Alert: {log.associatedAlertId}
+                        </div>
+                      )}
+                    </td>
                     <td className="py-3 px-3">
                       <div className="font-medium text-slate-900 dark:text-slate-200">{log.actorName}</div>
                       <div className="text-[10px] font-mono text-slate-500 uppercase">{log.actorRole}</div>
                     </td>
                     <td className="py-3 px-3 text-slate-700 dark:text-slate-300 max-w-xs">{log.justification}</td>
                     <td className="py-3 px-3 text-right font-mono">
-                      <span className="text-[10px] px-1.5 py-0.5 rounded bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300 border border-slate-200 dark:border-slate-700">
-                        SIMULATED
+                      <span
+                        className={`text-[10px] px-1.5 py-0.5 rounded border ${
+                          log.isSimulated
+                            ? 'bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300 border-slate-200 dark:border-slate-700'
+                            : isLive
+                            ? 'bg-emerald-50 dark:bg-emerald-950/80 text-emerald-700 dark:text-emerald-300 border-emerald-200 dark:border-emerald-800 font-semibold'
+                            : 'bg-purple-50 dark:bg-purple-950/80 text-purple-700 dark:text-purple-300 border-purple-200 dark:border-purple-800 font-semibold'
+                        }`}
+                      >
+                        {log.isSimulated ? 'SIMULATED' : isLive ? 'POSTGRESQL' : 'LOCAL RECORD'}
                       </span>
                     </td>
                   </tr>

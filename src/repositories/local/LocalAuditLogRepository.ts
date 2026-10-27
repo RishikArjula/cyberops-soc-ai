@@ -29,6 +29,18 @@ const INITIAL_AUDIT_LOGS: AuditLogEntry[] = [
     isSimulated: true,
     systemNote: 'Simulated endpoint isolation flag set. Network interface not severed in prototype environment.',
   },
+  {
+    id: 'AUD-GOV-001',
+    timestamp: '2026-10-12T00:00:00Z',
+    actorName: 'Platform Security System',
+    actorRole: 'super_admin',
+    actionType: 'platform_bootstrap',
+    targetResource: 'system.bootstrap.domain_c',
+    justification: 'Platform baseline security configuration and initial RBAC domain segregation established.',
+    status: 'SUCCESS',
+    isSimulated: false,
+    systemNote: 'Initial platform security baseline initialized.',
+  },
 ];
 
 const INITIAL_TASKS: IncidentTask[] = [
@@ -156,8 +168,22 @@ export class LocalAuditLogRepository implements IAuditLogRepository {
   }
 
   async getLogsForUser(user: UserProfile): Promise<AuditLogEntry[]> {
+    if (!user || !user.role) {
+      throw new AccessDeniedError('Unauthenticated access to audit logs', 'audit:read', 'unknown' as any);
+    }
     AuthorizationService.assertPermission(user, 'audit:read');
-    return this.getAuditData();
+    const all = this.getAuditData();
+    if (user.role === 'super_admin') {
+      // Super Admin receives platform governance logs; strictly isolated from operational containment & remediation
+      return all.filter(
+        (log) =>
+          log.actorRole === 'super_admin' ||
+          log.actionType === 'platform_bootstrap' ||
+          log.id.startsWith('AUD-GOV')
+      );
+    }
+    // Operational roles receive operational containment and remediation logs
+    return all.filter((log) => log.actorRole !== 'super_admin' && !log.id.startsWith('AUD-GOV'));
   }
 
   async recordSimulatedAction(
@@ -220,15 +246,43 @@ export class LocalAuditLogRepository implements IAuditLogRepository {
     const idx = tasks.findIndex((t) => t.id === taskId);
     if (idx === -1) throw new Error(`Task ${taskId} not found`);
 
+    const wasCompleted = tasks[idx].status === 'completed';
+    const completionTimestamp = new Date().toISOString();
     const updated: IncidentTask = {
       ...tasks[idx],
       status,
-      completedAt: status === 'completed' ? new Date().toISOString() : tasks[idx].completedAt,
-      completedBy: status === 'completed' ? `${user.name} (${user.callsign})` : tasks[idx].completedBy,
+      completedAt: status === 'completed' ? (tasks[idx].completedAt || completionTimestamp) : tasks[idx].completedAt,
+      completedBy: status === 'completed' ? (tasks[idx].completedBy || `${user.name} (${user.callsign || user.role})`) : tasks[idx].completedBy,
       completionNotes: notes || tasks[idx].completionNotes,
     };
     tasks[idx] = updated;
     this.saveTasksData(tasks);
+
+    // Record operational remediation_verified audit event upon completion (with idempotency check to avoid duplicate logs on retry)
+    if (status === 'completed' && !wasCompleted) {
+      const logs = this.getAuditData();
+      const alreadyLogged = logs.some(
+        (l) => l.actionType === 'remediation_verified' && l.systemNote.includes(`task ${taskId}`)
+      );
+      if (!alreadyLogged) {
+        const auditEntry: AuditLogEntry = {
+          id: `AUD-SIM-${Date.now().toString().slice(-5)}`,
+          timestamp: updated.completedAt || completionTimestamp,
+          actorName: user.name,
+          actorRole: user.role,
+          actionType: 'remediation_verified',
+          targetResource: updated.targetAsset || `Task ${taskId}`,
+          justification: notes || `Remediation verified for task ${taskId}.`,
+          status: 'SIMULATED_SUCCESS',
+          associatedAlertId: updated.associatedAlertId,
+          isSimulated: true,
+          systemNote: `Remediation verification confirmed for task ${taskId}. Operator attestation and checklist verified.`,
+        };
+        logs.unshift(auditEntry);
+        this.saveAuditData(logs);
+      }
+    }
+
     return updated;
   }
 
@@ -270,6 +324,42 @@ export class LocalAuditLogRepository implements IAuditLogRepository {
     tasks.unshift(newTask);
     this.saveTasksData(tasks);
     return newTask;
+  }
+
+  async recordGovernanceAction(
+    admin: UserProfile,
+    action: {
+      actionType: 'unlock_account' | 'lock_account';
+      targetEmail: string;
+      justification: string;
+      systemNote?: string;
+      expectedAuditId?: string;
+    }
+  ): Promise<AuditLogEntry> {
+    if (admin.role !== 'super_admin') {
+      throw new AccessDeniedError(
+        'Access Denied: Only Platform Administrators may record governance actions.',
+        'platform:admin',
+        admin.role
+      );
+    }
+
+    const logs = this.getAuditData();
+    const newLog: AuditLogEntry = {
+      id: action.expectedAuditId || `AUD-GOV-${Date.now().toString().slice(-5)}`,
+      timestamp: new Date().toISOString(),
+      actorName: admin.name,
+      actorRole: admin.role,
+      actionType: action.actionType,
+      targetResource: action.targetEmail,
+      justification: action.justification,
+      status: 'SUCCESS',
+      isSimulated: false,
+      systemNote: action.systemNote || `Governance action for ${action.targetEmail}`,
+    };
+    logs.unshift(newLog);
+    this.saveAuditData(logs);
+    return newLog;
   }
 }
 

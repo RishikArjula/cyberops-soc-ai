@@ -1,9 +1,12 @@
-import React from 'react';
+import React, { useState, useMemo } from 'react';
 import { UserProfile } from '../types/auth';
 import { AppHeader } from '../components/layout/AppHeader';
 import { AppSidebar, WorkspaceView } from '../components/layout/AppSidebar';
 import { StorageNoticeBanner } from '../components/common/StorageNoticeBanner';
 import { DevRoleSimulator } from '../components/layout/DevRoleSimulator';
+import { CopilotTriggerButton } from '../components/copilot/CopilotTriggerButton';
+import { CopilotDrawer } from '../components/copilot/CopilotDrawer';
+import { CopilotContextType } from '../server/ai/types';
 
 interface WorkspaceLayoutProps {
   currentUser: UserProfile;
@@ -13,6 +16,7 @@ interface WorkspaceLayoutProps {
   criticalCount: number;
   taskCount: number;
   onExitToPublic: () => void;
+  selectedAlertId?: string;
   children: React.ReactNode;
 }
 
@@ -24,8 +28,28 @@ export const WorkspaceLayout: React.FC<WorkspaceLayoutProps> = ({
   criticalCount,
   taskCount,
   onExitToPublic,
+  selectedAlertId,
   children,
 }) => {
+  const [isCopilotOpen, setIsCopilotOpen] = useState(false);
+
+  // Derive default context type from the active workspace view
+  const defaultContextType = useMemo((): CopilotContextType => {
+    switch (currentView) {
+      case 'alerts':
+      case 'investigations':
+        return 'alert_triage';
+      case 'mitre':
+        return 'mitre_analysis';
+      case 'tasks':
+        return 'remediation_task';
+      case 'admin':
+        return 'platform_health';
+      default:
+        return 'general_soc';
+    }
+  }, [currentView]);
+
   return (
     <div className="min-h-screen bg-slate-100/80 dark:bg-slate-950 text-slate-900 dark:text-slate-100 flex flex-col font-sans transition-colors duration-150">
       {/* Storage Architecture Limitation Banner */}
@@ -36,6 +60,7 @@ export const WorkspaceLayout: React.FC<WorkspaceLayoutProps> = ({
         alertCount={alertCount}
         criticalCount={criticalCount}
         onExitToPublic={onExitToPublic}
+        onNavigateToProfile={() => onViewChange('profile')}
       />
 
       <div className="flex-1 flex overflow-hidden">
@@ -54,8 +79,22 @@ export const WorkspaceLayout: React.FC<WorkspaceLayoutProps> = ({
         </main>
       </div>
 
-      {/* Floating Developer/Evaluation Role Simulator */}
+      {/* Floating Developer/Evaluation Role Simulator (Bottom-Left) */}
       <DevRoleSimulator />
+
+      {/* Floating AI Security Copilot Trigger Button (Bottom-Right) */}
+      <CopilotTriggerButton
+        isOpen={isCopilotOpen}
+        onClick={() => setIsCopilotOpen(!isCopilotOpen)}
+      />
+
+      {/* Responsive AI Security Copilot Chat Drawer */}
+      <CopilotDrawer
+        isOpen={isCopilotOpen}
+        onClose={() => setIsCopilotOpen(false)}
+        defaultContextType={defaultContextType}
+        defaultEntityId={selectedAlertId}
+      />
     </div>
   );
 };

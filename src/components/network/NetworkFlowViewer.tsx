@@ -85,28 +85,36 @@ export const NetworkFlowViewer: React.FC = () => {
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-200 dark:divide-slate-800/80 font-mono text-[11px]">
-              {filteredFlows.map((flow) => (
-                <tr key={flow.flowId} className="hover:bg-slate-50 dark:hover:bg-slate-800/40 transition">
-                  <td className="py-3 px-3 font-bold text-slate-900 dark:text-slate-200">{flow.flowId}</td>
-                  <td className="py-3 px-3 text-blue-600 dark:text-cyan-300 font-semibold">{flow.sourceIp}:{flow.sourcePort}</td>
-                  <td className="py-3 px-3 text-amber-700 dark:text-amber-300 font-semibold">{flow.destinationIp}:{flow.destinationPort}</td>
-                  <td className="py-3 px-3 text-slate-700 dark:text-slate-300">{flow.protocol}</td>
-                  <td className="py-3 px-3 text-slate-500 dark:text-slate-400">{flow.flowDurationMs} ms</td>
-                  <td className="py-3 px-3 text-slate-800 dark:text-slate-200">{flow.flowBytesPerSec.toLocaleString()} B/s</td>
-                  <td className="py-3 px-3 text-slate-500 dark:text-slate-400">{flow.synFlagCount} / {flow.rstFlagCount} / {flow.ackFlagCount}</td>
-                  <td className="py-3 px-3 text-right">
-                    <span
-                      className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase border ${
-                        flow.label === 'BENIGN'
-                          ? 'bg-emerald-50 text-emerald-700 border-emerald-200 dark:bg-emerald-950 dark:text-emerald-300 dark:border-emerald-800'
-                          : 'bg-rose-50 text-rose-700 border-rose-200 dark:bg-rose-950 dark:text-rose-300 dark:border-rose-800'
-                      }`}
-                    >
-                      {flow.label}
-                    </span>
+              {filteredFlows.length === 0 ? (
+                <tr>
+                  <td colSpan={8} className="py-8 text-center text-slate-500 italic text-xs font-sans">
+                    No network flows match the selected filter criteria.
                   </td>
                 </tr>
-              ))}
+              ) : (
+                filteredFlows.map((flow) => (
+                  <tr key={flow.flowId} className="hover:bg-slate-50 dark:hover:bg-slate-800/40 transition">
+                    <td className="py-3 px-3 font-bold text-slate-900 dark:text-slate-200">{flow.flowId}</td>
+                    <td className="py-3 px-3 text-blue-600 dark:text-cyan-300 font-semibold">{flow.sourceIp}:{flow.sourcePort}</td>
+                    <td className="py-3 px-3 text-amber-700 dark:text-amber-300 font-semibold">{flow.destinationIp}:{flow.destinationPort}</td>
+                    <td className="py-3 px-3 text-slate-700 dark:text-slate-300">{flow.protocol}</td>
+                    <td className="py-3 px-3 text-slate-500 dark:text-slate-400">{flow.flowDurationMs} ms</td>
+                    <td className="py-3 px-3 text-slate-800 dark:text-slate-200">{flow.flowBytesPerSec.toLocaleString()} B/s</td>
+                    <td className="py-3 px-3 text-slate-500 dark:text-slate-400">{flow.synFlagCount} / {flow.rstFlagCount} / {flow.ackFlagCount}</td>
+                    <td className="py-3 px-3 text-right">
+                      <span
+                        className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase border ${
+                          flow.label === 'BENIGN'
+                            ? 'bg-emerald-50 text-emerald-700 border-emerald-200 dark:bg-emerald-950 dark:text-emerald-300 dark:border-emerald-800'
+                            : 'bg-rose-50 text-rose-700 border-rose-200 dark:bg-rose-950 dark:text-rose-300 dark:border-rose-800'
+                        }`}
+                      >
+                        {flow.label}
+                      </span>
+                    </td>
+                  </tr>
+                ))
+              )}
             </tbody>
           </table>
         </div>

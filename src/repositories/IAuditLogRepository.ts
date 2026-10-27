@@ -39,4 +39,18 @@ export interface IAuditLogRepository {
    * Creates a remediation task. Asserts authorization.
    */
   createTask(user: UserProfile, task: Omit<IncidentTask, 'id' | 'createdAt'>): Promise<IncidentTask>;
+
+  /**
+   * Records and confirms a platform governance audit log.
+   */
+  recordGovernanceAction(
+    admin: UserProfile,
+    action: {
+      actionType: 'unlock_account' | 'lock_account';
+      targetEmail: string;
+      justification: string;
+      systemNote?: string;
+      expectedAuditId?: string;
+    }
+  ): Promise<AuditLogEntry>;
 }

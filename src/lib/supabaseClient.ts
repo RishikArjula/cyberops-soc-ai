@@ -60,9 +60,10 @@ const isProd = Boolean(rawEnv?.PROD ?? (nodeEnv?.NODE_ENV === 'production'));
  * Accepts both legacy anon JWT keys and modern Supabase publishable keys (sb_publishable_...).
  */
 export function isSupabaseConfigured(
-  url: string | undefined = supabaseUrl,
-  key: string | undefined = supabaseKey
+  ...args: [string | undefined, string | undefined] | [string | undefined] | []
 ): boolean {
+  const url = args.length > 0 ? args[0] : supabaseUrl;
+  const key = args.length > 1 ? args[1] : supabaseKey;
   if (!url || !key) {
     return false;
   }
@@ -111,19 +112,19 @@ export interface SupabaseEnvOverrides {
  * Evaluates the current configuration status and safe operating mode.
  */
 export function getSupabaseConfigurationStatus(overrides?: SupabaseEnvOverrides): SupabaseConfigStatus {
-  const targetUrl = overrides?.url !== undefined ? overrides.url : supabaseUrl;
+  const targetUrl = overrides && 'url' in overrides ? overrides.url : supabaseUrl;
 
   let targetKey: string | undefined;
-  if (overrides?.key !== undefined) {
+  if (overrides && 'key' in overrides) {
     targetKey = overrides.key;
-  } else if (overrides?.anonKey !== undefined || overrides?.publishableKey !== undefined) {
+  } else if (overrides && ('anonKey' in overrides || 'publishableKey' in overrides)) {
     targetKey = resolveSupabaseKey(overrides.anonKey, overrides.publishableKey);
   } else {
     targetKey = supabaseKey;
   }
 
-  const targetIsProd = overrides?.isProd !== undefined ? overrides.isProd : isProd;
-  const targetIsDev = overrides?.isDev !== undefined ? overrides.isDev : isDev;
+  const targetIsProd = overrides && 'isProd' in overrides ? Boolean(overrides.isProd) : isProd;
+  const targetIsDev = overrides && 'isDev' in overrides ? Boolean(overrides.isDev) : isDev;
 
   const configured = isSupabaseConfigured(targetUrl, targetKey);
 

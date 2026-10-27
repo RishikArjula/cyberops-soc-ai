@@ -11,6 +11,8 @@ dotenv.config();
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
+import { createCopilotRouter, CopilotRouterOptions } from './src/server/ai/copilotRouter';
+
 /**
  * Determine the runtime port cleanly:
  * - In production (Cloud Run), the container injects PORT (typically 8080).
@@ -39,7 +41,11 @@ export interface ServerInstance {
   close: () => Promise<void>;
 }
 
-export async function createServer(): Promise<ServerInstance> {
+export interface CreateServerOptions {
+  copilotOptions?: CopilotRouterOptions;
+}
+
+export async function createServer(options?: CreateServerOptions): Promise<ServerInstance> {
   const app = express();
   const httpServer = http.createServer(app);
   let viteDevServer: ViteDevServer | undefined;
@@ -66,6 +72,10 @@ export async function createServer(): Promise<ServerInstance> {
       version: '1.0.0',
     });
   });
+
+  // Mount AI Copilot router under /api/copilot
+  const copilotRouter = createCopilotRouter(options?.copilotOptions);
+  apiRouter.use('/copilot', copilotRouter);
 
   app.use('/api', apiRouter);
 

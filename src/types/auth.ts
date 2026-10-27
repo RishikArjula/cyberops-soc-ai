@@ -5,6 +5,8 @@
 
 export type UserRole = 'soc_analyst' | 'security_engineer' | 'it_operations' | 'super_admin';
 
+export type AccountStatus = 'pending' | 'approved' | 'disabled' | 'rejected';
+
 export interface UserProfile {
   id: string;
   name: string;
@@ -13,6 +15,11 @@ export interface UserProfile {
   callsign: string;
   avatarUrl?: string;
   title: string;
+  accountStatus?: AccountStatus;
+  approvedBy?: string;
+  approvedAt?: string;
+  createdAt?: string;
+  lastAuditId?: string;
 }
 
 export type Permission =
@@ -29,6 +36,7 @@ export type Permission =
   | 'action:propose'
   | 'action:authorize_simulated'
   | 'audit:read'
+  | 'audit:export'
   | 'telemetry:read'
   | 'platform:admin'
   | 'platform:health_read';
@@ -60,12 +68,14 @@ export const ROLE_PERMISSIONS: Record<UserRole, Permission[]> = {
     'incident:update',
     'action:authorize_simulated',
     'audit:read',
+    'telemetry:read',
   ],
   // Super Admin: Platform administration ONLY. Explicitly isolated from private SOC alerts and investigation notes!
   super_admin: [
     'platform:admin',
     'platform:health_read',
     'audit:read',
+    'audit:export',
   ],
 };
 
@@ -100,6 +110,7 @@ export const DEMO_PERSONAS: Record<UserRole, UserProfile> = {
     role: 'soc_analyst',
     callsign: 'SPECTER-1',
     title: 'Senior Incident Analyst',
+    accountStatus: 'approved',
   },
   security_engineer: {
     id: 'usr-engineer-01',
@@ -108,6 +119,7 @@ export const DEMO_PERSONAS: Record<UserRole, UserProfile> = {
     role: 'security_engineer',
     callsign: 'SENTINEL-4',
     title: 'Detection Engineer',
+    accountStatus: 'approved',
   },
   it_operations: {
     id: 'usr-itops-01',
@@ -116,6 +128,7 @@ export const DEMO_PERSONAS: Record<UserRole, UserProfile> = {
     role: 'it_operations',
     callsign: 'RECOVERY-9',
     title: 'Lead Systems Administrator',
+    accountStatus: 'approved',
   },
   super_admin: {
     id: 'usr-admin-01',
@@ -124,6 +137,7 @@ export const DEMO_PERSONAS: Record<UserRole, UserProfile> = {
     role: 'super_admin',
     callsign: 'SYSADMIN-0',
     title: 'Platform Security Administrator',
+    accountStatus: 'approved',
   },
 };
 

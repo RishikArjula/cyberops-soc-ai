@@ -57,6 +57,20 @@ export class AuthorizationService {
     return this.hasPermission(role, 'platform:admin');
   }
 
+  public static canExportAuditLogs(role: UserRole): boolean {
+    return this.hasPermission(role, 'audit:export');
+  }
+
+  public static assertCanExportAuditLogs(user: UserProfile): void {
+    if (!this.canExportAuditLogs(user.role)) {
+      throw new AccessDeniedError(
+        `Access Denied: Role "${user.role}" is not authorized to export audit logs. Only Super Admin can export audit logs.`,
+        'audit:export',
+        user.role
+      );
+    }
+  }
+
   /**
    * Record-level access check for an alert:
    * - SOC Analyst: full access to all alerts.
@@ -82,17 +96,25 @@ export class AuthorizationService {
    * Defines strictly permitted UI workspace views for each role.
    */
   public static readonly ROLE_AUTHORIZED_VIEWS: Record<UserRole, string[]> = {
-    soc_analyst: ['alerts', 'mitre', 'tasks', 'network', 'audit'],
-    security_engineer: ['mitre', 'alerts', 'network', 'audit'],
-    it_operations: ['tasks', 'alerts', 'audit'],
-    super_admin: ['admin', 'audit'],
+    soc_analyst: [
+      'overview',
+      'alerts',
+      'investigations',
+      'playbooks',
+      'network',
+      'audit',
+      'profile',
+    ],
+    security_engineer: ['mitre', 'alerts', 'network', 'audit', 'profile'],
+    it_operations: ['tasks', 'alerts', 'network', 'audit', 'profile'],
+    super_admin: ['admin', 'audit', 'profile'],
   };
 
   /**
    * Default primary landing view for each role.
    */
   public static readonly ROLE_DEFAULT_VIEW: Record<UserRole, string> = {
-    soc_analyst: 'alerts',
+    soc_analyst: 'overview',
     security_engineer: 'mitre',
     it_operations: 'tasks',
     super_admin: 'admin',

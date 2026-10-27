@@ -7,11 +7,23 @@ import {
   Activity,
   Shield,
   Server,
-  Lock,
+  LayoutDashboard,
+  Search,
+  BookOpen,
 } from 'lucide-react';
 import { UserRole, ROLE_METADATA, UserProfile } from '../../types/auth';
 
-export type WorkspaceView = 'alerts' | 'mitre' | 'tasks' | 'audit' | 'network' | 'admin';
+export type WorkspaceView =
+  | 'overview'
+  | 'alerts'
+  | 'investigations'
+  | 'playbooks'
+  | 'mitre'
+  | 'tasks'
+  | 'network'
+  | 'audit'
+  | 'profile'
+  | 'admin';
 
 interface AppSidebarProps {
   currentView: WorkspaceView;
@@ -49,6 +61,14 @@ export const AppSidebar: React.FC<AppSidebarProps> = ({
       primaryRole: 'super_admin',
     },
     {
+      id: 'overview',
+      label: 'SOC Overview',
+      description: 'Triage metrics & operational posture',
+      icon: <LayoutDashboard className="w-4 h-4 text-indigo-600 dark:text-indigo-400" />,
+      authorizedRoles: ['soc_analyst'],
+      primaryRole: 'soc_analyst',
+    },
+    {
       id: 'alerts',
       label: currentUser.role === 'it_operations' ? 'Scoped Incident Alerts' : 'Alert Triage Queue',
       description: 'Incoming alerts & telemetry evidence',
@@ -58,11 +78,27 @@ export const AppSidebar: React.FC<AppSidebarProps> = ({
       primaryRole: 'soc_analyst',
     },
     {
+      id: 'investigations',
+      label: 'Deep Investigation',
+      description: 'Forensic evidence & note correlation',
+      icon: <Search className="w-4 h-4 text-sky-600 dark:text-sky-400" />,
+      authorizedRoles: ['soc_analyst'],
+      primaryRole: 'soc_analyst',
+    },
+    {
+      id: 'playbooks',
+      label: 'Response Playbooks',
+      description: 'Containment simulation SOPs',
+      icon: <BookOpen className="w-4 h-4 text-emerald-600 dark:text-emerald-400" />,
+      authorizedRoles: ['soc_analyst'],
+      primaryRole: 'soc_analyst',
+    },
+    {
       id: 'mitre',
       label: 'Threat Intelligence (MITRE)',
       description: 'Enterprise tactics, techniques & defenses',
       icon: <Layers className="w-4 h-4 text-blue-600 dark:text-cyan-400" />,
-      authorizedRoles: ['soc_analyst', 'security_engineer'],
+      authorizedRoles: ['security_engineer'],
       primaryRole: 'security_engineer',
     },
     {
@@ -71,7 +107,7 @@ export const AppSidebar: React.FC<AppSidebarProps> = ({
       description: 'Authorized containment & recovery tasks',
       icon: <ClipboardList className="w-4 h-4 text-amber-600 dark:text-amber-400" />,
       badgeCount: taskCount,
-      authorizedRoles: ['it_operations', 'soc_analyst'],
+      authorizedRoles: ['it_operations'],
       primaryRole: 'it_operations',
     },
     {
@@ -79,7 +115,7 @@ export const AppSidebar: React.FC<AppSidebarProps> = ({
       label: 'Network Flow Telemetry',
       description: 'CIC-IDS2017 structured flow analysis',
       icon: <Activity className="w-4 h-4 text-teal-600 dark:text-emerald-400" />,
-      authorizedRoles: ['soc_analyst', 'security_engineer'],
+      authorizedRoles: ['soc_analyst', 'security_engineer', 'it_operations'],
     },
     {
       id: 'audit',

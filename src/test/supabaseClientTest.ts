@@ -197,22 +197,41 @@ function runSupabaseClientTests() {
   // --- Group 4: Fail-Closed Client Access Invariants ---
   console.log('-- Group 4: Fail-Closed Client Access Invariants --');
 
-  assert(
-    supabase === null,
-    'Default unconfigured export "supabase" is null (no unauthenticated connection instantiated)'
-  );
+  if (!isSupabaseConfigured()) {
+    assert(
+      supabase === null,
+      'Default unconfigured export "supabase" is null (no unauthenticated connection instantiated)'
+    );
 
-  let devThrownError: Error | null = null;
-  try {
-    getSupabaseClient();
-  } catch (err) {
-    devThrownError = err as Error;
+    let devThrownError: Error | null = null;
+    try {
+      getSupabaseClient();
+    } catch (err) {
+      devThrownError = err as Error;
+    }
+    assert(
+      devThrownError !== null &&
+        devThrownError.message.includes('[CyberOps SOC Notice]'),
+      'Calling getSupabaseClient() in unconfigured environment throws explicit error'
+    );
+  } else {
+    assert(
+      supabase !== null,
+      'Configured export "supabase" is instantiated with active client instance'
+    );
+
+    let clientRetrieved = false;
+    try {
+      const c = getSupabaseClient();
+      clientRetrieved = c !== null;
+    } catch {
+      clientRetrieved = false;
+    }
+    assert(
+      clientRetrieved,
+      'Calling getSupabaseClient() in configured environment successfully retrieves client'
+    );
   }
-  assert(
-    devThrownError !== null &&
-      devThrownError.message.includes('[CyberOps SOC Notice]'),
-    'Calling getSupabaseClient() in unconfigured environment throws explicit error'
-  );
 
   console.log(`\n=== COMPLETED: ${passed} of ${passed + failed} SUPABASE CLIENT TESTS PASSED ===\n`);
 

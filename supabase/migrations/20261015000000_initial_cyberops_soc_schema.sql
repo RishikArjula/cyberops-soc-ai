@@ -30,6 +30,11 @@ CREATE TABLE IF NOT EXISTS public.platform_bootstrap_state (
   CONSTRAINT single_bootstrap_state_row CHECK (id = 1)
 );
 
+-- Ensure platform bootstrap singleton lock row exists
+INSERT INTO public.platform_bootstrap_state (id, is_bootstrapped)
+VALUES (1, false)
+ON CONFLICT (id) DO NOTHING;
+
 -- User profiles table extending auth.users
 CREATE TABLE IF NOT EXISTS public.user_profiles (
   id UUID PRIMARY KEY REFERENCES auth.users(id) ON DELETE CASCADE,
@@ -261,6 +266,9 @@ BEGIN
      (NEW.role <> 'super_admin' OR NEW.account_status <> 'approved') THEN
     -- Serialize admin demotion checks using consistent exclusive lock on singleton bootstrap state
     PERFORM 1 FROM public.platform_bootstrap_state WHERE id = 1 FOR UPDATE;
+    IF NOT FOUND THEN
+      RAISE EXCEPTION 'Security Policy Invariant Violation: platform_bootstrap_state lock row (id=1) is missing.';
+    END IF;
 
     SELECT count(*) INTO active_admin_count
     FROM public.user_profiles
@@ -290,6 +298,9 @@ BEGIN
   IF (OLD.role = 'super_admin' AND OLD.account_status = 'approved') THEN
     -- Serialize admin deletion checks using consistent exclusive lock on singleton bootstrap state
     PERFORM 1 FROM public.platform_bootstrap_state WHERE id = 1 FOR UPDATE;
+    IF NOT FOUND THEN
+      RAISE EXCEPTION 'Security Policy Invariant Violation: platform_bootstrap_state lock row (id=1) is missing.';
+    END IF;
 
     SELECT count(*) INTO active_admin_count
     FROM public.user_profiles
@@ -419,11 +430,13 @@ ALTER TABLE public.audit_logs ENABLE ROW LEVEL SECURITY;
 -- RLS: platform_bootstrap_state
 -- ------------------------------------------------------------------------------
 -- Public can read bootstrap status (needed for initial setup check)
+DROP POLICY IF EXISTS "bootstrap_read_policy" ON public.platform_bootstrap_state;
 CREATE POLICY "bootstrap_read_policy" ON public.platform_bootstrap_state
   FOR SELECT TO authenticated, anon
   USING (true);
 
 -- Modifications restricted strictly to service_role (Express backend bootstrap route)
+DROP POLICY IF EXISTS "bootstrap_admin_mutation" ON public.platform_bootstrap_state;
 CREATE POLICY "bootstrap_admin_mutation" ON public.platform_bootstrap_state
   FOR ALL TO service_role
   USING (true)
@@ -433,6 +446,7 @@ CREATE POLICY "bootstrap_admin_mutation" ON public.platform_bootstrap_state
 -- RLS: user_profiles
 -- ------------------------------------------------------------------------------
 -- SELECT: Users can view their own profile; approved Super Admins can view all profiles
+DROP POLICY IF EXISTS "profiles_select_policy" ON public.user_profiles;
 CREATE POLICY "profiles_select_policy" ON public.user_profiles
   FOR SELECT TO authenticated
   USING (
@@ -441,6 +455,7 @@ CREATE POLICY "profiles_select_policy" ON public.user_profiles
   );
 
 -- INSERT: Authenticated users can insert their own record upon registration
+DROP POLICY IF EXISTS "profiles_insert_policy" ON public.user_profiles;
 CREATE POLICY "profiles_insert_policy" ON public.user_profiles
   FOR INSERT TO authenticated
   WITH CHECK (
@@ -448,6 +463,7 @@ CREATE POLICY "profiles_insert_policy" ON public.user_profiles
   );
 
 -- UPDATE: Users can update cosmetic fields on own profile; Super Admin can update approvals and roles
+DROP POLICY IF EXISTS "profiles_update_policy" ON public.user_profiles;
 CREATE POLICY "profiles_update_policy" ON public.user_profiles
   FOR UPDATE TO authenticated
   USING (
@@ -466,6 +482,7 @@ CREATE POLICY "profiles_update_policy" ON public.user_profiles
 -- RLS: alerts (Super Admin STRICTLY ISOLATED)
 -- ------------------------------------------------------------------------------
 -- SELECT: SOC Analysts & Security Engineers view all; IT Ops view task-linked only; Super Admin DENIED
+DROP POLICY IF EXISTS "alerts_select_policy" ON public.alerts;
 CREATE POLICY "alerts_select_policy" ON public.alerts
   FOR SELECT TO authenticated
   USING (
@@ -478,6 +495,7 @@ CREATE POLICY "alerts_select_policy" ON public.alerts
   );
 
 -- INSERT: Only approved SOC Analysts can insert alerts
+DROP POLICY IF EXISTS "alerts_insert_policy" ON public.alerts;
 CREATE POLICY "alerts_insert_policy" ON public.alerts
   FOR INSERT TO authenticated
   WITH CHECK (
@@ -486,6 +504,7 @@ CREATE POLICY "alerts_insert_policy" ON public.alerts
   );
 
 -- UPDATE: Only approved SOC Analysts can update triage status
+DROP POLICY IF EXISTS "alerts_update_policy" ON public.alerts;
 CREATE POLICY "alerts_update_policy" ON public.alerts
   FOR UPDATE TO authenticated
   USING (
@@ -504,6 +523,7 @@ CREATE POLICY "alerts_update_policy" ON public.alerts
 -- RLS: alert_notes (Private Strictly to SOC Analysts)
 -- ------------------------------------------------------------------------------
 -- SELECT: SOC Analysts ONLY
+DROP POLICY IF EXISTS "notes_select_policy" ON public.alert_notes;
 CREATE POLICY "notes_select_policy" ON public.alert_notes
   FOR SELECT TO authenticated
   USING (
@@ -512,6 +532,7 @@ CREATE POLICY "notes_select_policy" ON public.alert_notes
   );
 
 -- INSERT: SOC Analysts ONLY (must attribute to self)
+DROP POLICY IF EXISTS "notes_insert_policy" ON public.alert_notes;
 CREATE POLICY "notes_insert_policy" ON public.alert_notes
   FOR INSERT TO authenticated
   WITH CHECK (
@@ -525,6 +546,7 @@ CREATE POLICY "notes_insert_policy" ON public.alert_notes
 -- RLS: incident_tasks (Operational Tasks - Super Admin ISOLATED)
 -- ------------------------------------------------------------------------------
 -- SELECT: Scoped by role
+DROP POLICY IF EXISTS "tasks_select_policy" ON public.incident_tasks;
 CREATE POLICY "tasks_select_policy" ON public.incident_tasks
   FOR SELECT TO authenticated
   USING (
@@ -537,6 +559,7 @@ CREATE POLICY "tasks_select_policy" ON public.incident_tasks
   );
 
 -- INSERT: SOC Analysts create tasks
+DROP POLICY IF EXISTS "tasks_insert_policy" ON public.incident_tasks;
 CREATE POLICY "tasks_insert_policy" ON public.incident_tasks
   FOR INSERT TO authenticated
   WITH CHECK (
@@ -545,6 +568,7 @@ CREATE POLICY "tasks_insert_policy" ON public.incident_tasks
   );
 
 -- UPDATE: SOC Analysts can update all tasks; IT Ops & Engineers update tasks assigned to their role
+DROP POLICY IF EXISTS "tasks_update_policy" ON public.incident_tasks;
 CREATE POLICY "tasks_update_policy" ON public.incident_tasks
   FOR UPDATE TO authenticated
   USING (
@@ -568,6 +592,7 @@ CREATE POLICY "tasks_update_policy" ON public.incident_tasks
 -- RLS: audit_logs (Segregated Domain Access)
 -- ------------------------------------------------------------------------------
 -- SELECT: Platform logs to Super Admin; Operational logs to Operational roles
+DROP POLICY IF EXISTS "audit_select_policy" ON public.audit_logs;
 CREATE POLICY "audit_select_policy" ON public.audit_logs
   FOR SELECT TO authenticated
   USING (
@@ -579,12 +604,14 @@ CREATE POLICY "audit_select_policy" ON public.audit_logs
   );
 
 -- INSERT: Trusted backend (service_role) can record platform or operational events
+DROP POLICY IF EXISTS "audit_service_insert_policy" ON public.audit_logs;
 CREATE POLICY "audit_service_insert_policy" ON public.audit_logs
   FOR INSERT TO service_role
   WITH CHECK (true);
 
 -- INSERT: Authenticated operational roles can insert ONLY operational events attributed to themselves
 -- Notice: platform audit events are strictly reserved for trusted server-side creation via service_role
+DROP POLICY IF EXISTS "audit_insert_policy" ON public.audit_logs;
 CREATE POLICY "audit_insert_policy" ON public.audit_logs
   FOR INSERT TO authenticated
   WITH CHECK (

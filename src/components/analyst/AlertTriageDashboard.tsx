@@ -1,21 +1,29 @@
 import React, { useState, useMemo } from 'react';
 import { SecurityAlert, AlertSeverity, AlertStatus } from '../../types/alert';
+import { UserProfile } from '../../types/auth';
 import { MitreTactic } from '../../types/mitre';
 import { SeverityIndicator } from '../common/SeverityIndicator';
 import { ProvenanceBadge } from '../common/ProvenanceBadge';
 import { Button } from '../common/Button';
 import { DESIGN_TOKENS } from '../../constants/designTokens';
+import { AuthorizationService } from '../../services/authorizationService';
+import { AlertMetricsService } from '../../services/alertMetricsService';
 import {
   Search,
-  Filter,
   RefreshCw,
   AlertOctagon,
-  ShieldAlert,
-  Clock,
-  ArrowUpDown,
-  Eye,
-  SlidersHorizontal,
   ChevronRight,
+  CheckSquare,
+  Square,
+  MinusSquare,
+  CheckCircle2,
+  AlertTriangle,
+  X,
+  Layers,
+  ArrowRight,
+  Clock,
+  ShieldCheck,
+  ShieldAlert,
 } from 'lucide-react';
 
 interface AlertTriageDashboardProps {
@@ -24,6 +32,10 @@ interface AlertTriageDashboardProps {
   onSelectAlert: (alert: SecurityAlert) => void;
   onRefresh: () => void;
   selectedAlertId?: string;
+  onInvestigateAlert?: (alert: SecurityAlert) => void;
+  currentUser?: UserProfile;
+  onUpdateAlertStatus?: (alertId: string, status: AlertStatus) => Promise<void>;
+  isLoading?: boolean;
 }
 
 export const AlertTriageDashboard: React.FC<AlertTriageDashboardProps> = ({
@@ -32,6 +44,10 @@ export const AlertTriageDashboard: React.FC<AlertTriageDashboardProps> = ({
   onSelectAlert,
   onRefresh,
   selectedAlertId,
+  onInvestigateAlert,
+  currentUser,
+  onUpdateAlertStatus,
+  isLoading = false,
 }) => {
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedSeverities, setSelectedSeverities] = useState<AlertSeverity[]>([]);
@@ -39,6 +55,22 @@ export const AlertTriageDashboard: React.FC<AlertTriageDashboardProps> = ({
   const [selectedTactic, setSelectedTactic] = useState<string>('all');
   const [sortBy, setSortBy] = useState<'detectedAt' | 'severity' | 'confidenceScore'>('detectedAt');
   const [sortOrder, setSortOrder] = useState<'asc' | 'desc'>('desc');
+
+  // Multi-alert selection state
+  const [selectedAlertIds, setSelectedAlertIds] = useState<string[]>([]);
+  const [isBatchProcessing, setIsBatchProcessing] = useState(false);
+  const [batchFeedback, setBatchFeedback] = useState<{
+    type: 'success' | 'warning' | 'error';
+    message: string;
+    succeeded: string[];
+    failed: Array<{ id: string; error: string }>;
+  } | null>(null);
+
+  // Check if current user possesses alert:triage permission
+  const canTriage = useMemo(() => {
+    if (!currentUser) return false;
+    return AuthorizationService.hasPermission(currentUser.role, 'alert:triage');
+  }, [currentUser]);
 
   // Metrics computation
   const metrics = useMemo(() => {
@@ -120,6 +152,156 @@ export const AlertTriageDashboard: React.FC<AlertTriageDashboardProps> = ({
     setSortOrder('desc');
   };
 
+  // Selection handlers
+  const handleToggleSelectAllFiltered = () => {
+    const filteredIds = filteredAlerts.map((a) => a.id);
+    const allSelected = filteredIds.length > 0 && filteredIds.every((id) => selectedAlertIds.includes(id));
+
+    if (allSelected) {
+      // Deselect all filtered
+      setSelectedAlertIds((prev) => prev.filter((id) => !filteredIds.includes(id)));
+    } else {
+      // Select all filtered (union)
+      setSelectedAlertIds((prev) => Array.from(new Set([...prev, ...filteredIds])));
+    }
+  };
+
+  const handleToggleSelectOne = (id: string, e: React.MouseEvent) => {
+    e.stopPropagation();
+    setSelectedAlertIds((prev) =>
+      prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]
+    );
+  };
+
+  const handleClearSelection = () => {
+    setSelectedAlertIds([]);
+    setBatchFeedback(null);
+  };
+
+  // Compute eligible counts for selected alerts
+  const selectedAlertObjects = useMemo(() => {
+    return alerts.filter((a) => selectedAlertIds.includes(a.id));
+  }, [alerts, selectedAlertIds]);
+
+  const eligibleForInTriage = useMemo(() => {
+    return selectedAlertObjects.filter((a) =>
+      AlertMetricsService.isStatusTransitionValid(a.status, 'in_triage')
+    );
+  }, [selectedAlertObjects]);
+
+  const eligibleForEscalated = useMemo(() => {
+    return selectedAlertObjects.filter((a) =>
+      AlertMetricsService.isStatusTransitionValid(a.status, 'escalated')
+    );
+  }, [selectedAlertObjects]);
+
+  const eligibleForResolved = useMemo(() => {
+    return selectedAlertObjects.filter((a) =>
+      AlertMetricsService.isStatusTransitionValid(a.status, 'resolved')
+    );
+  }, [selectedAlertObjects]);
+
+  const eligibleForFalsePositive = useMemo(() => {
+    return selectedAlertObjects.filter((a) =>
+      AlertMetricsService.isStatusTransitionValid(a.status, 'false_positive')
+    );
+  }, [selectedAlertObjects]);
+
+  // Execute bulk triage transition sequentially with per-record verification
+  const handleExecuteBulkTransition = async (targetStatus: AlertStatus) => {
+    if (isBatchProcessing) return;
+
+    // 1. Re-verify authorization defensively
+    if (!currentUser || !AuthorizationService.hasPermission(currentUser.role, 'alert:triage')) {
+      setBatchFeedback({
+        type: 'error',
+        message: `Authorization Violation: Role "${currentUser?.role || 'operator'}" does not possess "alert:triage" permission.`,
+        succeeded: [],
+        failed: selectedAlertIds.map((id) => ({ id, error: 'Unauthorized role' })),
+      });
+      return;
+    }
+
+    // 2. Filter down to eligible alerts
+    const eligibleAlerts = selectedAlertObjects.filter((a) =>
+      AlertMetricsService.isStatusTransitionValid(a.status, targetStatus)
+    );
+
+    if (eligibleAlerts.length === 0) {
+      setBatchFeedback({
+        type: 'warning',
+        message: `None of the selected ${selectedAlertIds.length} alerts can be transitioned to "${targetStatus}". Selected alerts are already in that state or prohibited by transition rules.`,
+        succeeded: [],
+        failed: [],
+      });
+      return;
+    }
+
+    if (!onUpdateAlertStatus) {
+      setBatchFeedback({
+        type: 'error',
+        message: 'No update handler configured for alert status mutations.',
+        succeeded: [],
+        failed: eligibleAlerts.map((a) => ({ id: a.id, error: 'Missing handler' })),
+      });
+      return;
+    }
+
+    setIsBatchProcessing(true);
+    setBatchFeedback(null);
+
+    const succeeded: string[] = [];
+    const failed: Array<{ id: string; error: string }> = [];
+
+    // 3. Sequential update with individual error boundary
+    for (const alert of eligibleAlerts) {
+      try {
+        await onUpdateAlertStatus(alert.id, targetStatus);
+        succeeded.push(alert.id);
+      } catch (err: any) {
+        failed.push({
+          id: alert.id,
+          error: err.message || 'Update failed',
+        });
+      }
+    }
+
+    // 4. Reconcile selection state
+    setSelectedAlertIds((prev) => prev.filter((id) => !succeeded.includes(id)));
+
+    // 5. Construct feedback message
+    if (failed.length === 0) {
+      setBatchFeedback({
+        type: 'success',
+        message: `Successfully transitioned ${succeeded.length} alerts to "${targetStatus}": ${succeeded.join(', ')}.`,
+        succeeded,
+        failed: [],
+      });
+    } else if (succeeded.length > 0) {
+      setBatchFeedback({
+        type: 'warning',
+        message: `Partial batch completion: ${succeeded.length} alerts updated to "${targetStatus}", ${failed.length} failed. Succeeded: ${succeeded.join(', ')}. Failed: ${failed.map((f) => `${f.id} (${f.error})`).join('; ')}.`,
+        succeeded,
+        failed,
+      });
+    } else {
+      setBatchFeedback({
+        type: 'error',
+        message: `Bulk update failed: 0 of ${eligibleAlerts.length} alerts updated. Errors: ${failed.map((f) => `${f.id} (${f.error})`).join('; ')}.`,
+        succeeded: [],
+        failed,
+      });
+    }
+
+    setIsBatchProcessing(false);
+  };
+
+  const allFilteredSelected =
+    filteredAlerts.length > 0 &&
+    filteredAlerts.every((a) => selectedAlertIds.includes(a.id));
+  const someFilteredSelected =
+    filteredAlerts.some((a) => selectedAlertIds.includes(a.id)) && !allFilteredSelected;
+
   return (
     <div className="space-y-4">
       {/* Top Banner & Title */}
@@ -133,13 +315,19 @@ export const AlertTriageDashboard: React.FC<AlertTriageDashboardProps> = ({
             <ProvenanceBadge type="synthetic_demo" label="SYNTHETIC DEMO ALERTS" />
           </div>
           <p className="text-xs text-slate-400 mt-0.5">
-            Real-time security alert queue with deterministic evaluation and MITRE ATT&CK correlation.
+            Real-time security alert queue with multi-alert batch triage, deterministic evaluation, and MITRE ATT&CK correlation.
           </p>
         </div>
 
         <div className="flex items-center gap-2">
-          <Button size="sm" variant="secondary" onClick={onRefresh} icon={<RefreshCw className="w-3.5 h-3.5" />}>
-            Refresh Queue
+          <Button
+            size="sm"
+            variant="secondary"
+            onClick={onRefresh}
+            disabled={isLoading}
+            icon={<RefreshCw className={`w-3.5 h-3.5 ${isLoading ? 'animate-spin' : ''}`} />}
+          >
+            {isLoading ? 'Refreshing...' : 'Refresh Queue'}
           </Button>
         </div>
       </div>
@@ -277,12 +465,175 @@ export const AlertTriageDashboard: React.FC<AlertTriageDashboardProps> = ({
         </div>
       </div>
 
+      {/* Multi-Alert Selection & Bulk Triage Toolbar */}
+      {selectedAlertIds.length > 0 && (
+        <div className="p-3.5 bg-slate-900 border-2 border-indigo-600/70 rounded-lg shadow-md space-y-3">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+            <div className="flex items-center gap-2">
+              <span className="flex items-center justify-center w-6 h-6 rounded-full bg-indigo-600 text-white font-mono text-xs font-bold">
+                {selectedAlertIds.length}
+              </span>
+              <div>
+                <span className="text-xs font-bold text-slate-100">
+                  {selectedAlertIds.length} Alert{selectedAlertIds.length === 1 ? '' : 's'} Selected for Batch Operations
+                </span>
+                <span className="text-[11px] text-slate-400 block font-mono">
+                  {selectedAlertIds.join(', ')}
+                </span>
+              </div>
+            </div>
+
+            <div className="flex items-center gap-2">
+              <Button
+                size="xs"
+                variant="outline"
+                onClick={handleClearSelection}
+                disabled={isBatchProcessing}
+              >
+                Clear Selection
+              </Button>
+            </div>
+          </div>
+
+          {/* Action buttons & Permissions gating */}
+          {canTriage ? (
+            <div className="pt-2 border-t border-slate-800 flex flex-wrap items-center gap-2">
+              <span className="text-[10px] font-mono uppercase text-slate-400 mr-1 font-bold">
+                TRANSITION TO:
+              </span>
+
+              <Button
+                size="xs"
+                variant="outline"
+                disabled={isBatchProcessing || eligibleForInTriage.length === 0}
+                onClick={() => handleExecuteBulkTransition('in_triage')}
+                className="text-xs text-blue-300 border-blue-900 hover:bg-blue-950/60"
+              >
+                <Clock className="w-3 h-3 mr-1 text-blue-400" />
+                In Triage ({eligibleForInTriage.length})
+              </Button>
+
+              <Button
+                size="xs"
+                variant="outline"
+                disabled={isBatchProcessing || eligibleForEscalated.length === 0}
+                onClick={() => handleExecuteBulkTransition('escalated')}
+                className="text-xs text-purple-300 border-purple-900 hover:bg-purple-950/60"
+              >
+                <ShieldAlert className="w-3 h-3 mr-1 text-purple-400" />
+                Escalate to IR ({eligibleForEscalated.length})
+              </Button>
+
+              <Button
+                size="xs"
+                variant="outline"
+                disabled={isBatchProcessing || eligibleForResolved.length === 0}
+                onClick={() => handleExecuteBulkTransition('resolved')}
+                className="text-xs text-emerald-300 border-emerald-900 hover:bg-emerald-950/60"
+              >
+                <CheckCircle2 className="w-3 h-3 mr-1 text-emerald-400" />
+                Mark Resolved ({eligibleForResolved.length})
+              </Button>
+
+              <Button
+                size="xs"
+                variant="outline"
+                disabled={isBatchProcessing || eligibleForFalsePositive.length === 0}
+                onClick={() => handleExecuteBulkTransition('false_positive')}
+                className="text-xs text-slate-300 border-slate-800 hover:bg-slate-800/60"
+              >
+                <ShieldCheck className="w-3 h-3 mr-1 text-slate-400" />
+                False Positive ({eligibleForFalsePositive.length})
+              </Button>
+
+              {isBatchProcessing && (
+                <span className="text-xs font-mono text-cyan-400 flex items-center gap-1.5 ml-2">
+                  <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                  Executing sequential triage updates...
+                </span>
+              )}
+            </div>
+          ) : (
+            <div className="pt-2 border-t border-slate-800 text-[11px] text-amber-400/90 flex items-center gap-2">
+              <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
+              <span>
+                <strong>Read-Only Scoping:</strong> Current role{' '}
+                <code className="px-1 py-0.5 rounded bg-slate-950 font-mono text-slate-300">
+                  {currentUser?.role || 'operator'}
+                </code>{' '}
+                does not possess the <code className="text-cyan-400">alert:triage</code> capability. Bulk state transitions are restricted to SOC Analysts.
+              </span>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Batch Feedback Banner */}
+      {batchFeedback && (
+        <div
+          className={`p-3 rounded-lg border text-xs flex items-start justify-between gap-3 ${
+            batchFeedback.type === 'success'
+              ? 'bg-emerald-950/60 border-emerald-800 text-emerald-200'
+              : batchFeedback.type === 'warning'
+              ? 'bg-amber-950/60 border-amber-800 text-amber-200'
+              : 'bg-rose-950/60 border-rose-800 text-rose-200'
+          }`}
+        >
+          <div className="flex items-start gap-2">
+            {batchFeedback.type === 'success' ? (
+              <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0 mt-0.5" />
+            ) : batchFeedback.type === 'warning' ? (
+              <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
+            ) : (
+              <AlertOctagon className="w-4 h-4 text-rose-400 shrink-0 mt-0.5" />
+            )}
+            <div className="space-y-1">
+              <p className="font-semibold">{batchFeedback.message}</p>
+              {batchFeedback.failed.length > 0 && (
+                <ul className="text-[11px] font-mono list-disc list-inside space-y-0.5 text-rose-300">
+                  {batchFeedback.failed.map((f) => (
+                    <li key={f.id}>
+                      {f.id}: {f.error}
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+          </div>
+          <button
+            onClick={() => setBatchFeedback(null)}
+            className="text-slate-400 hover:text-slate-200 cursor-pointer p-0.5"
+            aria-label="Dismiss feedback"
+          >
+            <X className="w-4 h-4" />
+          </button>
+        </div>
+      )}
+
       {/* Alerts Table / List */}
       <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-lg overflow-hidden shadow-xs">
         <div className="overflow-x-auto">
           <table className="w-full text-left text-xs border-collapse">
             <thead>
               <tr className="bg-slate-50 dark:bg-slate-950/80 border-b border-slate-200 dark:border-slate-800 text-[10px] font-mono uppercase text-slate-500 dark:text-slate-400 tracking-wider">
+                {/* Select All Checkbox */}
+                <th className="py-2.5 px-3 w-8 text-center">
+                  <button
+                    type="button"
+                    onClick={handleToggleSelectAllFiltered}
+                    className="cursor-pointer text-slate-400 hover:text-slate-200 focus:outline-none"
+                    title={allFilteredSelected ? 'Deselect all filtered' : 'Select all filtered'}
+                    aria-label={allFilteredSelected ? 'Deselect all filtered' : 'Select all filtered'}
+                  >
+                    {allFilteredSelected ? (
+                      <CheckSquare className="w-4 h-4 text-cyan-400" />
+                    ) : someFilteredSelected ? (
+                      <MinusSquare className="w-4 h-4 text-cyan-400" />
+                    ) : (
+                      <Square className="w-4 h-4" />
+                    )}
+                  </button>
+                </th>
                 <th className="py-2.5 px-3">Severity</th>
                 <th className="py-2.5 px-3">Alert ID</th>
                 <th className="py-2.5 px-3">Title & Summary</th>
@@ -296,13 +647,16 @@ export const AlertTriageDashboard: React.FC<AlertTriageDashboardProps> = ({
             <tbody className="divide-y divide-slate-200 dark:divide-slate-800/80 font-sans">
               {filteredAlerts.length === 0 ? (
                 <tr>
-                  <td colSpan={8} className="py-8 text-center text-slate-500 italic text-xs">
-                    No security alerts match the selected filter criteria.
+                  <td colSpan={9} className="py-8 text-center text-slate-500 italic text-xs">
+                    {alerts.length === 0
+                      ? 'The operational alert queue is currently empty. Ingesting incoming telemetry...'
+                      : 'No security alerts match the selected filter criteria.'}
                   </td>
                 </tr>
               ) : (
                 filteredAlerts.map((alert) => {
-                  const isSelected = selectedAlertId === alert.id;
+                  const isDrawerSelected = selectedAlertId === alert.id;
+                  const isChecked = selectedAlertIds.includes(alert.id);
                   const statusToken = DESIGN_TOKENS.status[alert.status] || DESIGN_TOKENS.status.new;
 
                   return (
@@ -310,9 +664,29 @@ export const AlertTriageDashboard: React.FC<AlertTriageDashboardProps> = ({
                       key={alert.id}
                       onClick={() => onSelectAlert(alert)}
                       className={`hover:bg-slate-50 dark:hover:bg-slate-800/60 transition cursor-pointer ${
-                        isSelected ? 'bg-blue-50/80 dark:bg-slate-800/80 ring-1 ring-inset ring-blue-500/50 dark:ring-cyan-500/50' : ''
+                        isDrawerSelected
+                          ? 'bg-blue-50/80 dark:bg-slate-800/80 ring-1 ring-inset ring-blue-500/50 dark:ring-cyan-500/50'
+                          : isChecked
+                          ? 'bg-indigo-950/20 dark:bg-indigo-950/30'
+                          : ''
                       }`}
                     >
+                      {/* Checkbox column */}
+                      <td className="py-3 px-3 text-center shrink-0">
+                        <button
+                          type="button"
+                          onClick={(e) => handleToggleSelectOne(alert.id, e)}
+                          className="cursor-pointer text-slate-400 hover:text-slate-200 focus:outline-none"
+                          aria-label={`Select alert ${alert.id}`}
+                        >
+                          {isChecked ? (
+                            <CheckSquare className="w-4 h-4 text-cyan-400" />
+                          ) : (
+                            <Square className="w-4 h-4" />
+                          )}
+                        </button>
+                      </td>
+
                       {/* Severity */}
                       <td className="py-3 px-3 shrink-0">
                         <SeverityIndicator severity={alert.severity} showLabel={false} size="sm" />
@@ -369,10 +743,13 @@ export const AlertTriageDashboard: React.FC<AlertTriageDashboardProps> = ({
                       <td className="py-3 px-3 text-right">
                         <Button
                           size="xs"
-                          variant={isSelected ? 'primary' : 'outline'}
+                          variant={isDrawerSelected ? 'primary' : 'outline'}
                           onClick={(e) => {
                             e.stopPropagation();
                             onSelectAlert(alert);
+                            if (onInvestigateAlert) {
+                              onInvestigateAlert(alert);
+                            }
                           }}
                         >
                           <span>Investigate</span>
