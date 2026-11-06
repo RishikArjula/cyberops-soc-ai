@@ -2,7 +2,7 @@ import React from 'react';
 import { Database, ShieldCheck, Cpu } from 'lucide-react';
 
 interface ProvenanceBadgeProps {
-  type: 'authentic_mitre' | 'synthetic_demo' | 'cic_ids_sample' | 'deterministic_rule';
+  type: 'authentic_mitre' | 'synthetic_demo' | 'cic_ids_sample' | 'deterministic_rule' | 'controlled_simulation';
   label?: string;
   className?: string;
 }
@@ -12,6 +12,18 @@ export const ProvenanceBadge: React.FC<ProvenanceBadgeProps> = ({
   label,
   className = '',
 }) => {
+  if (type === 'controlled_simulation') {
+    return (
+      <span
+        title="Notice: Controlled Simulated Windows Event Detection Pipeline event"
+        className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-mono tracking-wide font-bold bg-amber-100 text-amber-800 border border-amber-300 dark:bg-amber-950/80 dark:text-amber-300 dark:border-amber-700 ${className}`}
+      >
+        <Cpu className="w-3 h-3 text-amber-600 dark:text-amber-400" />
+        <span>{label || 'CONTROLLED SIMULATION'}</span>
+      </span>
+    );
+  }
+
   if (type === 'authentic_mitre') {
     return (
       <span

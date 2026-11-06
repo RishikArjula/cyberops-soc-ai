@@ -201,15 +201,15 @@ async function main() {
 
   console.log('\n-- Group 5: Role Authorization & Read-Only Boundaries --');
 
-  runTest('Test 8: security_engineer default landing view is "mitre"', () => {
+  runTest('Test 8: security_engineer default landing view is "seceng_overview"', () => {
     assert(
-      AuthorizationService.getDefaultViewForRole('security_engineer') === 'mitre',
-      'Security Engineer default view must be "mitre"'
+      AuthorizationService.getDefaultViewForRole('security_engineer') === 'seceng_overview',
+      'Security Engineer default view must be "seceng_overview"'
     );
   });
 
-  runTest('Test 9: security_engineer is authorized for "mitre", "alerts", "network", "audit", "profile"', () => {
-    const allowed = ['mitre', 'alerts', 'network', 'audit', 'profile'];
+  runTest('Test 9: security_engineer is authorized for "seceng_overview", "mitre", "alerts", "audit", "profile"', () => {
+    const allowed = ['seceng_overview', 'mitre', 'alerts', 'audit', 'profile'];
     for (const v of allowed) {
       assert(
         AuthorizationService.isViewAuthorized('security_engineer', v),

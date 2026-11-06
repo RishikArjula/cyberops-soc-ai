@@ -139,10 +139,31 @@ export function useCopilot({
       try {
         const responseData: CopilotChatResponse = await sendCopilotMessage(requestPayload);
 
+        const rawText = (responseData.response || responseData.text || '').trim();
+
+        if (!rawText) {
+          const errorMessage: CopilotMessage = {
+            id: `msg-err-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
+            sender: 'assistant',
+            text: '',
+            timestamp: new Date().toISOString(),
+            contextType: activeType,
+            entityId: activeEntity,
+            error: {
+              status: 502,
+              code: 'EMPTY_RESPONSE',
+              message: 'The AI Copilot returned an empty advisory response. Please retry your query.',
+            },
+          };
+
+          setMessages((prev) => [...prev, errorMessage]);
+          return;
+        }
+
         const assistantMessage: CopilotMessage = {
           id: `msg-ast-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
           sender: 'assistant',
-          text: responseData.response,
+          text: rawText,
           timestamp: responseData.timestamp || new Date().toISOString(),
           contextType: responseData.contextType,
           entityId: responseData.entityId,

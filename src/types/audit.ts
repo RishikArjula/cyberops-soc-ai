@@ -15,7 +15,19 @@ export type ResponseActionType =
   | 'revoke_token'
   | 'collect_forensics'
   | 'platform_bootstrap'
-  | 'remediation_verified';
+  | 'task_created'
+  | 'remediation_started'
+  | 'remediation_verified'
+  | 'remediation_approved'
+  | 'remediation_rework_requested'
+  | 'alert_resolved'
+  | 'recommendation_created'
+  | 'recommendation_accepted'
+  | 'recommendation_rejected'
+  | 'recommendation_clarification_requested'
+  | 'recommendation_implementation_started'
+  | 'recommendation_implemented'
+  | 'recommendation_validated';
 
 export interface AuditLogEntry {
   id: string;

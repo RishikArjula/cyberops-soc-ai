@@ -143,15 +143,19 @@ export async function runRoleIsolationTests(): Promise<{ passed: number; total: 
 
   // --- ROLE-TO-VIEW AUTHORIZATION TESTS ---
 
-  // Test 13: SOC Analyst view access checks (authorized to alerts/investigations/network/audit/playbooks/overview/profile, denied admin, mitre, and tasks)
+  // Test 13: SOC Analyst view access checks (authorized to overview/strategies/analytics/log_sources/data_components/mitre_explorer/profile, denied admin, mitre, and tasks)
   try {
     assert(
-      AuthorizationService.isViewAuthorized('soc_analyst', 'alerts') &&
-      AuthorizationService.isViewAuthorized('soc_analyst', 'investigations') &&
+      AuthorizationService.isViewAuthorized('soc_analyst', 'overview') &&
+      AuthorizationService.isViewAuthorized('soc_analyst', 'strategies') &&
+      AuthorizationService.isViewAuthorized('soc_analyst', 'analytics') &&
+      AuthorizationService.isViewAuthorized('soc_analyst', 'log_sources') &&
+      AuthorizationService.isViewAuthorized('soc_analyst', 'data_components') &&
+      AuthorizationService.isViewAuthorized('soc_analyst', 'mitre_explorer') &&
       !AuthorizationService.isViewAuthorized('soc_analyst', 'tasks') &&
       !AuthorizationService.isViewAuthorized('soc_analyst', 'mitre') &&
       !AuthorizationService.isViewAuthorized('soc_analyst', 'admin'),
-      'SOC Analyst is granted operational analyst views and denied tasks, mitre, and admin views'
+      'SOC Analyst is granted authorized knowledge views and denied tasks, mitre, and admin views'
     );
     try {
       AuthorizationService.assertViewAccess('soc_analyst', 'admin');
@@ -193,14 +197,18 @@ export async function runRoleIsolationTests(): Promise<{ passed: number; total: 
     assert(false, `Security Engineer view authorization failed: ${e.message}`);
   }
 
-  // Test 15: IT Operations view access checks (authorized to tasks/alerts/network/audit, denied admin/mitre)
+  // Test 15: IT Operations view access checks (authorized to itops_overview/itops_techniques/itops_mitigations/tasks/alerts/audit, denied admin/mitre)
   try {
     assert(
+      AuthorizationService.isViewAuthorized('it_operations', 'itops_overview') &&
+      AuthorizationService.isViewAuthorized('it_operations', 'itops_techniques') &&
+      AuthorizationService.isViewAuthorized('it_operations', 'itops_mitigations') &&
       AuthorizationService.isViewAuthorized('it_operations', 'tasks') &&
-      AuthorizationService.isViewAuthorized('it_operations', 'network') &&
+      AuthorizationService.isViewAuthorized('it_operations', 'alerts') &&
+      AuthorizationService.isViewAuthorized('it_operations', 'audit') &&
       !AuthorizationService.isViewAuthorized('it_operations', 'admin') &&
       !AuthorizationService.isViewAuthorized('it_operations', 'mitre'),
-      'IT Operations is authorized to tasks and network, but denied admin and mitre views'
+      'IT Operations is authorized to IT Ops knowledge modules, tasks, alerts, and audit, but denied admin and mitre views'
     );
     try {
       AuthorizationService.assertViewAccess('it_operations', 'mitre');
@@ -237,8 +245,8 @@ export async function runRoleIsolationTests(): Promise<{ passed: number; total: 
   try {
     assert(
       AuthorizationService.getDefaultViewForRole('soc_analyst') === 'overview' &&
-      AuthorizationService.getDefaultViewForRole('security_engineer') === 'mitre' &&
-      AuthorizationService.getDefaultViewForRole('it_operations') === 'tasks' &&
+      AuthorizationService.getDefaultViewForRole('security_engineer') === 'seceng_overview' &&
+      AuthorizationService.getDefaultViewForRole('it_operations') === 'itops_overview' &&
       AuthorizationService.getDefaultViewForRole('super_admin') === 'admin',
       'All four roles resolve to their authorized default views on unauthorized navigation'
     );
@@ -392,7 +400,7 @@ export async function runRoleIsolationTests(): Promise<{ passed: number; total: 
 
   // Test 26: Dynamic task linkage and persistence round-trip
   try {
-    const dynamicTask = await auditRepo.createTask(itops, {
+    const dynamicTask = await auditRepo.createTask(analyst, {
       title: 'Automated Containment Verification Task',
       description: 'Dynamically created following simulated containment',
       assignedRole: 'it_operations',
@@ -544,7 +552,7 @@ export async function runRoleIsolationTests(): Promise<{ passed: number; total: 
   // Test 32: Synchronous batch creation produces unique task IDs without collisions
   try {
     const batchPromises = Array.from({ length: 10 }, (_, i) =>
-      auditRepo.createTask(itops, {
+      auditRepo.createTask(analyst, {
         title: `Rapid Triage Remediation #${i + 1}`,
         description: `Simultaneous task creation stress test step ${i + 1}`,
         assignedRole: 'it_operations',

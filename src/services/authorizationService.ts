@@ -61,6 +61,22 @@ export class AuthorizationService {
     return this.hasPermission(role, 'audit:export');
   }
 
+  public static canCreateRecommendation(role: UserRole): boolean {
+    return this.hasPermission(role, 'recommendation:create');
+  }
+
+  public static canReviewRecommendation(role: UserRole): boolean {
+    return this.hasPermission(role, 'recommendation:review');
+  }
+
+  public static canUpdateRecommendation(role: UserRole): boolean {
+    return this.hasPermission(role, 'recommendation:update');
+  }
+
+  public static canValidateRecommendation(role: UserRole): boolean {
+    return this.hasPermission(role, 'recommendation:validate');
+  }
+
   public static assertCanExportAuditLogs(user: UserProfile): void {
     if (!this.canExportAuditLogs(user.role)) {
       throw new AccessDeniedError(
@@ -98,15 +114,27 @@ export class AuthorizationService {
   public static readonly ROLE_AUTHORIZED_VIEWS: Record<UserRole, string[]> = {
     soc_analyst: [
       'overview',
+      'strategies',
+      'analytics',
+      'log_sources',
+      'data_components',
+      'mitre_explorer',
       'alerts',
       'investigations',
       'playbooks',
-      'network',
       'audit',
       'profile',
     ],
-    security_engineer: ['mitre', 'alerts', 'network', 'audit', 'profile'],
-    it_operations: ['tasks', 'alerts', 'network', 'audit', 'profile'],
+    security_engineer: ['seceng_overview', 'mitre', 'alerts', 'audit', 'profile'],
+    it_operations: [
+      'itops_overview',
+      'itops_techniques',
+      'itops_mitigations',
+      'tasks',
+      'alerts',
+      'audit',
+      'profile',
+    ],
     super_admin: ['admin', 'audit', 'profile'],
   };
 
@@ -115,8 +143,8 @@ export class AuthorizationService {
    */
   public static readonly ROLE_DEFAULT_VIEW: Record<UserRole, string> = {
     soc_analyst: 'overview',
-    security_engineer: 'mitre',
-    it_operations: 'tasks',
+    security_engineer: 'seceng_overview',
+    it_operations: 'itops_overview',
     super_admin: 'admin',
   };
 

@@ -51,24 +51,24 @@ export const HomePage: React.FC<HomePageProps> = ({
         {/* Quiet Kicker Label */}
         <div className="inline-flex items-center gap-2 px-3.5 py-1 rounded-full bg-white/90 dark:bg-purple-950/60 border border-purple-200/90 dark:border-purple-500/40 text-xs font-mono font-medium text-purple-700 dark:text-purple-300 shadow-xs">
           <Shield className="w-3.5 h-3.5 text-purple-700 dark:text-cyan-400" />
-          <span>CYBERSECURITY INCIDENT PLATFORM &bull; VERSION 2.0</span>
+          <span>KRYPTRION &bull; AI SECURITY OPERATIONS PLATFORM</span>
         </div>
 
         {/* Dual-Theme High Contrast Headline */}
-        
-        
         <h1 className="text-4xl sm:text-5xl lg:text-6xl font-extrabold tracking-tight text-slate-900 dark:text-white max-w-4xl mx-auto leading-tight font-heading">
-          <span className="text-slate-900 dark:text-white">
-            From Alerts to Action.{' '}
-          </span>
-          <span className="text-transparent bg-clip-text bg-gradient-to-r from-purple-600 via-fuchsia-600 to-cyan-500 dark:from-purple-400 dark:via-fuchsia-400 dark:to-cyan-400">
-            Smarter, Faster, Together.
+          <span className="sr-only">See the Threat. Understand the Risk. Respond Smarter.</span>
+          <span aria-hidden="true">
+            <span className="text-slate-900 dark:text-white">
+              See the Threat.{' '}
+            </span>
+            <span className="text-transparent bg-clip-text bg-gradient-to-r from-purple-600 via-fuchsia-600 to-cyan-500 dark:from-purple-400 dark:via-fuchsia-400 dark:to-cyan-400">
+              Understand the Risk. Respond Smarter.
+            </span>
           </span>
         </h1>
 
-
         <p className="text-sm sm:text-base text-slate-600 dark:text-slate-300 max-w-2xl mx-auto font-sans leading-relaxed">
-          An AI-assisted security operations platform designed to help teams investigate alerts, connect evidence with threat intelligence, identify defensive gaps, and coordinate authorized incident response.
+          Kryptrion is an enterprise AI Security Operations platform engineered for real-time alert triage, automated threat intelligence correlation, and proactive incident response. Empower your SOC team to accelerate investigation cycles, eliminate alert fatigue, and strengthen cyber defense with zero-trust governance.
         </p>
 
         {/* Central Layered 2.5D Animated CyberShield */}

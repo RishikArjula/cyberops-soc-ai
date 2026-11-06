@@ -11,6 +11,7 @@ import { IAuditLogRepository } from '../IAuditLogRepository';
 import { AuditLogEntry, IncidentTask } from '../../types/audit';
 import { UserProfile, AccessDeniedError } from '../../types/auth';
 import { AuthorizationService } from '../../services/authorizationService';
+import { formatApprovalNotes, formatReworkNotes, getTaskReviewState } from '../../utils/remediationReview';
 
 const AUDIT_STORAGE_KEY = 'ai_soc_audit_logs_v1';
 const TASKS_STORAGE_KEY = 'ai_soc_tasks_v1';
@@ -190,11 +191,14 @@ export class LocalAuditLogRepository implements IAuditLogRepository {
     user: UserProfile,
     entry: Omit<AuditLogEntry, 'id' | 'timestamp' | 'isSimulated' | 'actorName' | 'actorRole'>
   ): Promise<AuditLogEntry> {
-    // Assert authorization: Only IT Operations (action:authorize_simulated) or SOC Analyst (action:propose)
+    const isRecommendationAction = entry.actionType.startsWith('recommendation_');
+    const isAuthorizedRecommendationRole = user.role === 'security_engineer' || user.role === 'soc_analyst';
+
+    // Assert authorization: IT Operations, SOC Analyst, or authorized recommendation roles
     const canAuthorize = AuthorizationService.canAuthorizeSimulatedActions(user.role);
     const canPropose = AuthorizationService.canProposeActions(user.role);
 
-    if (!canAuthorize && !canPropose) {
+    if (!canAuthorize && !canPropose && !(isRecommendationAction && isAuthorizedRecommendationRole)) {
       throw new AccessDeniedError(
         `Access Denied: Role "${user.role}" is not authorized to execute or propose response actions.`,
         'action:authorize_simulated',
@@ -210,7 +214,7 @@ export class LocalAuditLogRepository implements IAuditLogRepository {
       actorName: user.name,
       actorRole: user.role,
       isSimulated: true,
-      status: canAuthorize ? 'SIMULATED_SUCCESS' : 'PROPOSED',
+      status: entry.status || (canAuthorize ? 'SIMULATED_SUCCESS' : 'PROPOSED'),
     };
     logs.unshift(newLog);
     this.saveAuditData(logs);
@@ -246,6 +250,7 @@ export class LocalAuditLogRepository implements IAuditLogRepository {
     const idx = tasks.findIndex((t) => t.id === taskId);
     if (idx === -1) throw new Error(`Task ${taskId} not found`);
 
+    const wasPending = tasks[idx].status === 'pending';
     const wasCompleted = tasks[idx].status === 'completed';
     const completionTimestamp = new Date().toISOString();
     const updated: IncidentTask = {
@@ -258,6 +263,26 @@ export class LocalAuditLogRepository implements IAuditLogRepository {
     tasks[idx] = updated;
     this.saveTasksData(tasks);
 
+    // Record remediation_started audit event when starting remediation from pending
+    if (status === 'in_progress' && wasPending) {
+      const logs = this.getAuditData();
+      const auditEntry: AuditLogEntry = {
+        id: `AUD-SIM-${Date.now().toString().slice(-5)}`,
+        timestamp: new Date().toISOString(),
+        actorName: user.name,
+        actorRole: user.role,
+        actionType: 'remediation_started',
+        targetResource: updated.targetAsset || `Task ${taskId}`,
+        justification: `Remediation procedure initiated by operator for task ${taskId}.`,
+        status: 'SIMULATED_SUCCESS',
+        associatedAlertId: updated.associatedAlertId,
+        isSimulated: true,
+        systemNote: `Remediation started for task ${taskId} by ${user.name} (${user.role}).`,
+      };
+      logs.unshift(auditEntry);
+      this.saveAuditData(logs);
+    }
+
     // Record operational remediation_verified audit event upon completion (with idempotency check to avoid duplicate logs on retry)
     if (status === 'completed' && !wasCompleted) {
       const logs = this.getAuditData();
@@ -265,6 +290,7 @@ export class LocalAuditLogRepository implements IAuditLogRepository {
         (l) => l.actionType === 'remediation_verified' && l.systemNote.includes(`task ${taskId}`)
       );
       if (!alreadyLogged) {
+        const isSimVerification = notes?.includes('Controlled Simulation') || notes?.toLowerCase().includes('simulation verification');
         const auditEntry: AuditLogEntry = {
           id: `AUD-SIM-${Date.now().toString().slice(-5)}`,
           timestamp: updated.completedAt || completionTimestamp,
@@ -276,7 +302,9 @@ export class LocalAuditLogRepository implements IAuditLogRepository {
           status: 'SIMULATED_SUCCESS',
           associatedAlertId: updated.associatedAlertId,
           isSimulated: true,
-          systemNote: `Remediation verification confirmed for task ${taskId}. Operator attestation and checklist verified.`,
+          systemNote: isSimVerification
+            ? `Controlled simulation verification confirmed for task ${taskId}. Synthetic telemetry reviewed with zero live endpoint changes.`
+            : `Remediation verification confirmed for task ${taskId}. Operator attestation and checklist verified.`,
         };
         logs.unshift(auditEntry);
         this.saveAuditData(logs);
@@ -284,6 +312,93 @@ export class LocalAuditLogRepository implements IAuditLogRepository {
     }
 
     return updated;
+  }
+
+  async reviewRemediationTask(
+    user: UserProfile,
+    taskId: string,
+    decision: 'approved' | 'rework_requested',
+    notes: string
+  ): Promise<IncidentTask> {
+    if (user.role !== 'soc_analyst') {
+      throw new AccessDeniedError(
+        `Access Denied: Role "${user.role}" is not authorized to review remediation tasks. Only SOC Analysts can review and approve remediation.`,
+        'incident:update',
+        user.role
+      );
+    }
+
+    const tasks = this.getTasksData();
+    const idx = tasks.findIndex((t) => t.id === taskId);
+    if (idx === -1) throw new Error(`Task ${taskId} not found`);
+
+    const currentTask = tasks[idx];
+
+    // Must be in completed status to be reviewed
+    if (currentTask.status !== 'completed') {
+      throw new Error(`Task ${taskId} is currently "${currentTask.status}". Only completed remediation tasks can be reviewed.`);
+    }
+
+    // Verify current review state: cannot review if already approved
+    const reviewState = getTaskReviewState(currentTask);
+    if (reviewState.status === 'approved') {
+      throw new Error(`Task ${taskId} has already been approved by a SOC Analyst. Duplicate review decisions are prevented.`);
+    }
+
+    // Validate inputs
+    const trimmedNotes = (notes || '').trim();
+    if (decision === 'rework_requested') {
+      if (trimmedNotes.length < 10) {
+        throw new Error('Mandatory rework instructions must be at least 10 characters long describing the corrective action required.');
+      }
+    }
+
+    const reviewTimestamp = new Date().toISOString();
+    let newStatus: IncidentTask['status'];
+    let updatedNotes: string;
+    let actionType: 'remediation_approved' | 'remediation_rework_requested';
+    let justification: string;
+
+    if (decision === 'approved') {
+      newStatus = 'completed'; // Keep task status as completed
+      updatedNotes = formatApprovalNotes(currentTask.completionNotes, user, trimmedNotes);
+      actionType = 'remediation_approved';
+      justification = trimmedNotes || 'Remediation verification and technical evidence validated and approved by SOC Analyst.';
+    } else {
+      newStatus = 'in_progress'; // Change task status from completed to in_progress
+      updatedNotes = formatReworkNotes(currentTask.completionNotes, user, trimmedNotes);
+      actionType = 'remediation_rework_requested';
+      justification = trimmedNotes;
+    }
+
+    const updatedTask: IncidentTask = {
+      ...currentTask,
+      status: newStatus,
+      completionNotes: updatedNotes,
+    };
+
+    tasks[idx] = updatedTask;
+    this.saveTasksData(tasks);
+
+    // Record immutable operational audit event
+    const logs = this.getAuditData();
+    const auditEntry: AuditLogEntry = {
+      id: `AUD-SIM-${Date.now().toString().slice(-5)}`,
+      timestamp: reviewTimestamp,
+      actorName: user.name,
+      actorRole: user.role,
+      actionType,
+      targetResource: currentTask.targetAsset || `Task ${taskId}`,
+      justification,
+      status: 'SIMULATED_SUCCESS',
+      associatedAlertId: currentTask.associatedAlertId,
+      isSimulated: true,
+      systemNote: `SOC Analyst remediation review decision (${decision.toUpperCase()}) recorded for task ${taskId}. Reviewer: ${user.name} (${user.callsign || user.role}).`,
+    };
+    logs.unshift(auditEntry);
+    this.saveAuditData(logs);
+
+    return updatedTask;
   }
 
   private static taskCounter = 0;
@@ -314,15 +429,58 @@ export class LocalAuditLogRepository implements IAuditLogRepository {
   }
 
   async createTask(user: UserProfile, task: Omit<IncidentTask, 'id' | 'createdAt'>): Promise<IncidentTask> {
-    // Both SOC Analysts (escalation) and IT Operations can create tasks
+    if (user.role !== 'soc_analyst') {
+      throw new AccessDeniedError(
+        `Access Denied: Role "${user.role}" is not authorized to create incident response tasks. Only SOC Analysts can create tasks.`,
+        'alert:escalate',
+        user.role
+      );
+    }
+
+    if (!task.title?.trim()) {
+      throw new Error('Task title is required.');
+    }
+    if (!task.description?.trim()) {
+      throw new Error('Task description and remediation instructions are required.');
+    }
+    if (!task.targetAsset?.trim()) {
+      throw new Error('Target asset is required.');
+    }
+    if (!task.associatedAlertId?.trim()) {
+      throw new Error('Associated alert ID is required.');
+    }
+
     const tasks = this.getTasksData();
     const newTask: IncidentTask = {
       ...task,
+      title: task.title.trim(),
+      description: task.description.trim(),
+      targetAsset: task.targetAsset.trim(),
+      associatedAlertId: task.associatedAlertId.trim(),
       id: this.generateUniqueTaskId(tasks),
       createdAt: new Date().toISOString(),
     };
     tasks.unshift(newTask);
     this.saveTasksData(tasks);
+
+    // Record immutable operational audit event for task creation
+    const logs = this.getAuditData();
+    const auditEntry: AuditLogEntry = {
+      id: `AUD-SIM-${Date.now().toString().slice(-5)}`,
+      timestamp: newTask.createdAt,
+      actorName: user.name,
+      actorRole: user.role,
+      actionType: 'task_created',
+      targetResource: newTask.targetAsset,
+      justification: newTask.description,
+      status: 'SIMULATED_SUCCESS',
+      associatedAlertId: newTask.associatedAlertId,
+      isSimulated: true,
+      systemNote: `Incident response task ${newTask.id} ("${newTask.title}") created by ${user.name} and assigned to ${newTask.assignedRole}.`,
+    };
+    logs.unshift(auditEntry);
+    this.saveAuditData(logs);
+
     return newTask;
   }
 

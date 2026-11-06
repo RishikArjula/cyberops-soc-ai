@@ -65,7 +65,9 @@ export class DetectionRuleService {
     let category = 'process_creation';
     let product = 'windows';
 
-    if (tech.dataSources.some((ds) => ds.toLowerCase().includes('network'))) {
+    if (tech.id === 'T1486' || tech.dataSources.some((ds) => ds.toLowerCase().includes('process'))) {
+      category = 'process_creation';
+    } else if (tech.dataSources.some((ds) => ds.toLowerCase().includes('network'))) {
       category = 'network_traffic';
     } else if (tech.dataSources.some((ds) => ds.toLowerCase().includes('logon') || ds.toLowerCase().includes('account'))) {
       category = 'authentication';
@@ -115,6 +117,10 @@ export class DetectionRuleService {
     } else if (tech.id === 'T1071.001') {
       selection['DestinationPort'] = ['80', '443', '8080'];
       selection['UserAgent|contains'] = ['curl', 'powershell', 'python'];
+    } else if (tech.id === 'T1053.005' || tech.id === 'T1053') {
+      selection['Image|endswith'] = '\\schtasks.exe';
+      selection['CommandLine|contains'] = ['/create', '/tn'];
+      falsePositives.push('Authorized administrative job scheduling or automated maintenance scripts');
     } else if (tech.id === 'T1486') {
       selection['Image|endswith'] = '\\vssadmin.exe';
       selection['CommandLine|contains'] = ['delete shadows', '/all', '/quiet'];

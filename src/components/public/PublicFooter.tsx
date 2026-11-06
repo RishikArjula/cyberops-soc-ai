@@ -15,10 +15,13 @@ export const PublicFooter: React.FC<PublicFooterProps> = ({ onNavigate }) => {
           <div className="space-y-3 md:col-span-1">
             <div className="flex items-center gap-2 text-slate-900 dark:text-slate-100 font-heading font-bold text-sm">
               <Shield className="w-5 h-5 text-purple-700 dark:text-cyan-400" />
-              <span>CYBEROPS SOC</span>
+              <span>KRYPTRION</span>
             </div>
+            <p className="text-[11px] font-semibold text-purple-700 dark:text-cyan-400">
+              See the Threat. Understand the Risk. Respond Smarter.
+            </p>
             <p className="text-[11px] text-slate-600 dark:text-slate-400 leading-relaxed font-sans">
-              Modular AI Security Operations & Incident Response platform built for deterministic triage, verifiable threat intelligence, and human-authorized containment.
+              Kryptrion is an enterprise AI Security Operations platform engineered for real-time alert triage, automated threat intelligence correlation, and proactive incident response. Empower your SOC team to accelerate investigation cycles, eliminate alert fatigue, and strengthen cyber defense with zero-trust governance.
             </p>
             <div className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-purple-50/80 dark:bg-purple-950/60 border border-purple-200/90 dark:border-purple-800/60 text-[10px] font-mono text-purple-700 dark:text-cyan-300">
               <span>Operational Prototype v2.0</span>
@@ -100,7 +103,7 @@ export const PublicFooter: React.FC<PublicFooterProps> = ({ onNavigate }) => {
 
         <div className="pt-8 border-t border-slate-200/80 dark:border-purple-900/30 flex flex-col sm:flex-row items-center justify-between gap-3 text-[11px] text-slate-500 dark:text-slate-500">
           <div>
-            &copy; {new Date().getFullYear()} CYBEROPS SOC. Autonomous AI incident response prototype.
+            &copy; {new Date().getFullYear()} Kryptrion. AI Security Operations Platform.
           </div>
           <div className="flex items-center gap-4 font-mono text-[10px]">
             <span>MITRE ATT&CK v14.1</span>

@@ -505,15 +505,64 @@ export const CopilotDrawer: React.FC<CopilotDrawerProps> = ({
                         Retry After: {msg.error.retryAfterSeconds} seconds
                       </p>
                     )}
-                    {msg.error.code === 'DEMO_MODE_AUTHENTICATION_UNAVAILABLE' && (
+                    {msg.error.code === 'DEMO_MODE_AUTHENTICATION_UNAVAILABLE' ? (
                       <div className="mt-2 pt-2 border-t border-red-200 dark:border-red-900/40 text-[10px] text-slate-600 dark:text-slate-400 font-mono">
                         Security Notice: Server cannot authenticate client localStorage demo personas. Connect live Supabase credentials to activate Gemini advisory.
                       </div>
+                    ) : (
+                      <div className="pt-1.5 flex items-center gap-2">
+                        <button
+                          type="button"
+                          onClick={() => {
+                            const msgIndex = messages.findIndex((m) => m.id === msg.id);
+                            const userMsg = msgIndex > 0 ? messages[msgIndex - 1] : null;
+                            if (userMsg && userMsg.text) {
+                              sendMessage(userMsg.text, {
+                                contextType: msg.contextType || contextType,
+                                entityId: msg.entityId || entityId,
+                              });
+                            }
+                          }}
+                          className="inline-flex items-center gap-1.5 px-2.5 py-1 text-[11px] font-medium rounded-md bg-red-100 hover:bg-red-200 dark:bg-red-900/50 dark:hover:bg-red-900/80 text-red-800 dark:text-red-200 border border-red-300 dark:border-red-800/60 transition cursor-pointer"
+                        >
+                          <RefreshCw className="w-3 h-3" />
+                          <span>Retry Query</span>
+                        </button>
+                      </div>
                     )}
                   </div>
-                ) : (
+                ) : msg.text && msg.text.trim().length > 0 ? (
                   <div className="space-y-2 whitespace-pre-wrap break-words font-sans">
                     {msg.text}
+                  </div>
+                ) : (
+                  <div className="p-3 rounded-lg bg-amber-50 dark:bg-amber-950/40 border border-amber-200 dark:border-amber-900/60 text-amber-900 dark:text-amber-300 space-y-1.5 font-sans">
+                    <div className="flex items-center gap-1.5 font-mono font-bold text-xs text-amber-700 dark:text-amber-400">
+                      <AlertTriangle className="w-4 h-4 shrink-0" />
+                      <span>Advisory Unavailable</span>
+                    </div>
+                    <p className="text-[11px] leading-normal">
+                      No advisory text was returned for this query. Please retry your request.
+                    </p>
+                    <div className="pt-1 flex items-center gap-2">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const msgIndex = messages.findIndex((m) => m.id === msg.id);
+                          const userMsg = msgIndex > 0 ? messages[msgIndex - 1] : null;
+                          if (userMsg && userMsg.text) {
+                            sendMessage(userMsg.text, {
+                              contextType: msg.contextType || contextType,
+                              entityId: msg.entityId || entityId,
+                            });
+                          }
+                        }}
+                        className="inline-flex items-center gap-1.5 px-2.5 py-1 text-[11px] font-medium rounded-md bg-amber-100 hover:bg-amber-200 dark:bg-amber-900/50 dark:hover:bg-amber-900/80 text-amber-900 dark:text-amber-200 border border-amber-300 dark:border-amber-800/60 transition cursor-pointer"
+                      >
+                        <RefreshCw className="w-3 h-3" />
+                        <span>Retry Query</span>
+                      </button>
+                    </div>
                   </div>
                 )}
 

@@ -43,7 +43,7 @@ export const PublicHeader: React.FC<PublicHeaderProps> = ({
             <Shield className="w-4 h-4" />
           </div>
           <span className="font-heading font-bold tracking-tight text-base text-slate-900 dark:text-white group-hover:text-purple-700 dark:group-hover:text-purple-300 transition-colors whitespace-nowrap">
-            CYBEROPS SOC
+            KRYPTRION
           </span>
         </div>
 

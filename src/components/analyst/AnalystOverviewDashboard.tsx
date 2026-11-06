@@ -1,9 +1,18 @@
-import React, { useMemo, useState } from 'react';
+import React, { useMemo, useState, useEffect, useCallback } from 'react';
 import { SecurityAlert, AlertStatus } from '../../types/alert';
 import { MitreTactic, MitreTechnique } from '../../types/mitre';
+import { UserProfile } from '../../types/auth';
 import { ProvenanceBadge } from '../common/ProvenanceBadge';
 import { Button } from '../common/Button';
 import { AlertMetricsService } from '../../services/alertMetricsService';
+import {
+  fetchSocAnalystKnowledge,
+  aggregateTechniquesByTactic,
+  aggregateLogSources,
+  SocAnalystKnowledgeRecord,
+  TacticAggregation,
+  LogSourceAggregation,
+} from '../../services/knowledgeService';
 import {
   AlertOctagon,
   ShieldAlert,
@@ -20,12 +29,18 @@ import {
   Timer,
   BarChart2,
   HelpCircle,
+  Database,
+  ShieldCheck,
+  ChevronDown,
+  ChevronUp,
 } from 'lucide-react';
+import { SocKnowledgeHub } from './knowledge/SocKnowledgeHub';
 
 interface AnalystOverviewDashboardProps {
   alerts: SecurityAlert[];
   tactics: MitreTactic[];
   techniques: MitreTechnique[];
+  currentUser?: UserProfile;
   onNavigateToQueue: () => void;
   onSelectAlertForInvestigation: (alert: SecurityAlert) => void;
   onRefresh?: () => void;
@@ -36,12 +51,20 @@ export const AnalystOverviewDashboard: React.FC<AnalystOverviewDashboardProps> =
   alerts,
   tactics,
   techniques,
+  currentUser,
   onNavigateToQueue,
   onSelectAlertForInvestigation,
   onRefresh,
   isLoading = false,
 }) => {
   const [selectedIntervalIndex, setSelectedIntervalIndex] = useState<number | null>(null);
+
+  // MITRE ATT&CK Knowledge & Detection Coverage state
+  const [knowledgeRecords, setKnowledgeRecords] = useState<SocAnalystKnowledgeRecord[]>([]);
+  const [isLoadingKnowledge, setIsLoadingKnowledge] = useState<boolean>(true);
+  const [knowledgeError, setKnowledgeError] = useState<string | null>(null);
+  const [showAllLogSources, setShowAllLogSources] = useState<boolean>(false);
+  const [showAllTactics, setShowAllTactics] = useState<boolean>(false);
 
   // Core metrics derived strictly from passed alert fixtures
   const metrics = useMemo(() => {
@@ -109,6 +132,82 @@ export const AnalystOverviewDashboard: React.FC<AnalystOverviewDashboardProps> =
     const counts = intakeTrend.buckets.map((b) => b.count);
     return Math.max(...counts, 1);
   }, [intakeTrend]);
+
+  // Load real reference knowledge records from public.soc_analyst_knowledge
+  const loadKnowledge = useCallback(async () => {
+    if (!currentUser) return;
+    setIsLoadingKnowledge(true);
+    setKnowledgeError(null);
+    try {
+      const records = await fetchSocAnalystKnowledge(currentUser);
+      setKnowledgeRecords(records);
+    } catch (err: any) {
+      setKnowledgeError(err?.message || 'Failed to query SOC Analyst knowledge database.');
+      setKnowledgeRecords([]);
+    } finally {
+      setIsLoadingKnowledge(false);
+    }
+  }, [currentUser]);
+
+  useEffect(() => {
+    let isMounted = true;
+    if (!currentUser) return;
+
+    setIsLoadingKnowledge(true);
+    setKnowledgeError(null);
+
+    fetchSocAnalystKnowledge(currentUser)
+      .then((records) => {
+        if (isMounted) {
+          setKnowledgeRecords(records);
+          setIsLoadingKnowledge(false);
+        }
+      })
+      .catch((err) => {
+        if (isMounted) {
+          setKnowledgeError(err?.message || 'Failed to query SOC Analyst knowledge database.');
+          setKnowledgeRecords([]);
+          setIsLoadingKnowledge(false);
+        }
+      });
+
+    return () => {
+      isMounted = false;
+    };
+  }, [currentUser]);
+
+  // Aggregated distributions for Chart A (Tactics) and Chart B (Log Sources)
+  const tacticDistribution = useMemo(() => {
+    return aggregateTechniquesByTactic(knowledgeRecords);
+  }, [knowledgeRecords]);
+
+  const logSourceDistribution = useMemo(() => {
+    return aggregateLogSources(knowledgeRecords);
+  }, [knowledgeRecords]);
+
+  const displayedTactics = useMemo(() => {
+    if (showAllTactics || tacticDistribution.length <= 10) {
+      return tacticDistribution;
+    }
+    return tacticDistribution.slice(0, 10);
+  }, [tacticDistribution, showAllTactics]);
+
+  const maxTacticCount = useMemo(() => {
+    if (displayedTactics.length === 0) return 1;
+    return Math.max(...displayedTactics.map((t) => t.count), 1);
+  }, [displayedTactics]);
+
+  const maxLogSourceCount = useMemo(() => {
+    if (logSourceDistribution.length === 0) return 1;
+    return Math.max(...logSourceDistribution.map((l) => l.count), 1);
+  }, [logSourceDistribution]);
+
+  const displayedLogSources = useMemo(() => {
+    if (showAllLogSources || logSourceDistribution.length <= 10) {
+      return logSourceDistribution;
+    }
+    return logSourceDistribution.slice(0, 10);
+  }, [logSourceDistribution, showAllLogSources]);
 
   return (
     <div className="space-y-6">
@@ -518,6 +617,17 @@ export const AnalystOverviewDashboard: React.FC<AnalystOverviewDashboardProps> =
           </div>
         </div>
       </div>
+
+      {/* MITRE ATT&CK & Telemetry Reference Knowledge Hub (The Six Knowledge Pages) */}
+      <section aria-label="Reference Knowledge Hub">
+        <SocKnowledgeHub
+          records={knowledgeRecords}
+          isLoading={isLoadingKnowledge}
+          error={knowledgeError}
+          onRefresh={loadKnowledge}
+          currentUser={currentUser}
+        />
+      </section>
 
       {/* Main Content Grid: Urgent Triage Priority & MITRE Mapping */}
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">

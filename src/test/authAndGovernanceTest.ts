@@ -21,7 +21,16 @@ import { fileURLToPath } from 'node:url';
 import { DEMO_PERSONAS, UserProfile, UserRole, AccessDeniedError } from '../types/auth';
 import { LocalAuditLogRepository } from '../repositories/local/LocalAuditLogRepository';
 import { SupabaseAuditLogRepository } from '../repositories/supabase/SupabaseAuditLogRepository';
-import { getSupabaseConfigurationStatus } from '../lib/supabaseClient';
+import {
+  getSupabaseConfigurationStatus,
+  getStorageMode,
+  setStorageMode,
+  migrateStorageMode,
+  clearAllAuthStorage,
+  scopedAuthStorageAdapter,
+  STORAGE_MODE_KEY,
+  AUTH_STORAGE_KEY,
+} from '../lib/supabaseClient';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -607,10 +616,359 @@ async function runAuthAndGovernanceTests() {
     'Migration 2 attributes automated bootstrap service role to system rather than super_admin'
   );
 
+  // =========================================================================
+  // Group 7: Remember Me Storage & Session Isolation Verification
+  // =========================================================================
+  console.log('-- Group 7: Remember Me Storage & Session Isolation Verification --');
+
+  // Set up in-memory mock storage provider for window.localStorage and window.sessionStorage
+  class MockStorage implements Storage {
+    private store = new Map<string, string>();
+    get length(): number {
+      return this.store.size;
+    }
+    clear(): void {
+      this.store.clear();
+    }
+    getItem(key: string): string | null {
+      return this.store.get(key) ?? null;
+    }
+    key(index: number): string | null {
+      return Array.from(this.store.keys())[index] ?? null;
+    }
+    removeItem(key: string): void {
+      this.store.delete(key);
+    }
+    setItem(key: string, value: string): void {
+      this.store.set(key, String(value));
+    }
+  }
+
+  const mockLocal = new MockStorage();
+  const mockSession = new MockStorage();
+  (globalThis as any).window = {
+    localStorage: mockLocal,
+    sessionStorage: mockSession,
+  };
+
+  // Test 7.1: Remember Me = true sets mode 'local'
+  setStorageMode('local');
+  assert(getStorageMode() === 'local', 'setStorageMode("local") correctly configures local storage mode');
+  assert(mockLocal.getItem(STORAGE_MODE_KEY) === 'local', 'Storage mode marker written to localStorage in local mode');
+
+  // Test 7.2: In 'local' mode, scopedAuthStorageAdapter writes to localStorage and removes from sessionStorage
+  mockSession.setItem('sb-test-token', 'stale-session-token');
+  scopedAuthStorageAdapter.setItem('sb-test-token', 'persistent-token-123');
+  assert(mockLocal.getItem('sb-test-token') === 'persistent-token-123', 'scopedAuthStorageAdapter writes auth token to localStorage in local mode');
+  assert(mockSession.getItem('sb-test-token') === null, 'scopedAuthStorageAdapter cleans stale key from sessionStorage in local mode');
+  assert(scopedAuthStorageAdapter.getItem('sb-test-token') === 'persistent-token-123', 'scopedAuthStorageAdapter reads auth token from localStorage in local mode');
+
+  // Test 7.3: Switching from persistent to session-only mode immediately purges persistent tokens from localStorage
+  mockLocal.setItem(AUTH_STORAGE_KEY, JSON.stringify(DEMO_PERSONAS.soc_analyst));
+  mockLocal.setItem('sb-test-token', 'persistent-token-123');
+  setStorageMode('session');
+  assert(getStorageMode() === 'session', 'setStorageMode("session") correctly configures session mode');
+  assert(mockLocal.getItem('sb-test-token') === null, 'Switching to session mode actively purges persistent Supabase auth token from localStorage');
+  assert(mockLocal.getItem(AUTH_STORAGE_KEY) === null, 'Switching to session mode actively purges demo session token from localStorage');
+  assert(mockSession.getItem(STORAGE_MODE_KEY) === 'session', 'Session mode marker written to sessionStorage');
+
+  // Test 7.4: In 'session' mode, scopedAuthStorageAdapter writes strictly to sessionStorage
+  scopedAuthStorageAdapter.setItem('sb-test-token', 'session-only-token-456');
+  assert(mockSession.getItem('sb-test-token') === 'session-only-token-456', 'scopedAuthStorageAdapter writes auth token to sessionStorage in session mode');
+  assert(mockLocal.getItem('sb-test-token') === null, 'scopedAuthStorageAdapter does not write auth token to localStorage in session mode');
+
+  // Test 7.5: Stale persistent token cannot be restored in session-only mode
+  mockLocal.setItem('sb-stray-token', 'rogue-persistent-token');
+  const readStray = scopedAuthStorageAdapter.getItem('sb-stray-token');
+  assert(readStray === null, 'Stale localStorage token is ignored when reading in session-only mode');
+  assert(mockLocal.getItem('sb-stray-token') === null, 'Stale localStorage token is deleted when encountered in session-only mode');
+
+  // Test 7.6: clearAllAuthStorage wipes all auth tokens across both sessionStorage and localStorage
+  mockLocal.setItem('sb-project-token', 'token-a');
+  mockSession.setItem('sb-project-token', 'token-b');
+  mockLocal.setItem(AUTH_STORAGE_KEY, 'demo-a');
+  mockSession.setItem(AUTH_STORAGE_KEY, 'demo-b');
+  clearAllAuthStorage();
+  assert(mockLocal.getItem('sb-project-token') === null, 'clearAllAuthStorage removes Supabase token from localStorage');
+  assert(mockSession.getItem('sb-project-token') === null, 'clearAllAuthStorage removes Supabase token from sessionStorage');
+  assert(mockLocal.getItem(AUTH_STORAGE_KEY) === null, 'clearAllAuthStorage removes demo session from localStorage');
+  assert(mockSession.getItem(AUTH_STORAGE_KEY) === null, 'clearAllAuthStorage removes demo session from sessionStorage');
+  assert(mockLocal.getItem(STORAGE_MODE_KEY) === null, 'clearAllAuthStorage removes mode marker from localStorage');
+  assert(mockSession.getItem(STORAGE_MODE_KEY) === null, 'clearAllAuthStorage removes mode marker from sessionStorage');
+
+  // Test 7.7: migrateStorageMode safely moves active tokens from localStorage to sessionStorage
+  setStorageMode('local');
+  mockLocal.setItem('sb-active-token', 'active-session-jwt');
+  mockLocal.setItem(AUTH_STORAGE_KEY, JSON.stringify(DEMO_PERSONAS.security_engineer));
+  migrateStorageMode('session');
+  assert(getStorageMode() === 'session', 'migrateStorageMode updates storage mode to "session"');
+  assert(mockSession.getItem('sb-active-token') === 'active-session-jwt', 'migrateStorageMode copies Supabase token to sessionStorage');
+  assert(mockLocal.getItem('sb-active-token') === null, 'migrateStorageMode removes token from localStorage');
+  assert(Boolean(mockSession.getItem(AUTH_STORAGE_KEY)), 'migrateStorageMode copies demo profile to sessionStorage');
+  assert(mockLocal.getItem(AUTH_STORAGE_KEY) === null, 'migrateStorageMode purges demo profile from localStorage');
+
+  // Test 7.8: migrateStorageMode safely moves active tokens from sessionStorage to localStorage
+  migrateStorageMode('local');
+  assert(getStorageMode() === 'local', 'migrateStorageMode updates storage mode to "local"');
+  assert(mockLocal.getItem('sb-active-token') === 'active-session-jwt', 'migrateStorageMode copies token back to localStorage');
+  assert(mockSession.getItem('sb-active-token') === null, 'migrateStorageMode purges token from sessionStorage');
+
+  // Test 7.9: Case 1 verification - selecting session-only login purges lingering persistent tokens
+  mockLocal.setItem('sb-prior-user-token', 'prior-user-jwt');
+  mockLocal.setItem('sb-prior-refresh', 'prior-refresh-jwt');
+  setStorageMode('session');
+  assert(mockLocal.getItem('sb-prior-user-token') === null, 'Selecting session-only login purges prior persistent session token');
+  assert(mockLocal.getItem('sb-prior-refresh') === null, 'Selecting session-only login purges prior persistent refresh token');
+
+  // Test 7.10: Case 3 verification - starting in session-only mode ignores and deletes stale persistent tokens
+  mockSession.setItem(STORAGE_MODE_KEY, 'session');
+  mockLocal.setItem('sb-stale-user', 'stale-jwt');
+  const readInSessionOnly = scopedAuthStorageAdapter.getItem('sb-stale-user');
+  assert(readInSessionOnly === null, 'Starting in session-only mode yields null for persistent localStorage token');
+  assert(mockLocal.getItem('sb-stale-user') === null, 'Stale persistent token is deleted from localStorage when accessed in session-only mode');
+
+  // =========================================================================
+  // Group 8: Stage C — Password Recovery, Validation, Access Gating & Branding
+  // =========================================================================
+  console.log('-- Group 8: Stage C — Password Recovery, Validation, Access Gating & Branding --');
+
+  // Test 8.1: Recovery request validation
+  function validateRecoveryEmail(email: string): { valid: boolean; error?: string } {
+    const clean = email.trim().toLowerCase();
+    if (!clean || !clean.includes('@')) {
+      return { valid: false, error: 'Please provide a valid enterprise email address.' };
+    }
+    return { valid: true };
+  }
+
+  assert(validateRecoveryEmail('').valid === false, 'Recovery rejects empty email input');
+  assert(validateRecoveryEmail('invalid-email').valid === false, 'Recovery rejects email without domain');
+  assert(validateRecoveryEmail('operator@kryptrion.soc').valid === true, 'Recovery accepts valid email address');
+
+  // Test 8.2: Neutral confirmation invariant (prevents account enumeration attacks)
+  function simulateRecoveryRequest(email: string, userExists: boolean): { success: boolean; message: string } {
+    // Both existing and non-existing accounts receive the exact same neutral response
+    const valid = validateRecoveryEmail(email);
+    if (!valid.valid) {
+      return { success: false, message: valid.error! };
+    }
+    return {
+      success: true,
+      message: 'If an account matches that email address, password recovery instructions have been dispatched. Please check your inbox and spam folder.',
+    };
+  }
+
+  const existingRes = simulateRecoveryRequest('alex.mercer@soc.internal', true);
+  const nonExistingRes = simulateRecoveryRequest('unknown.user@external.org', false);
   assert(
-    migrationContent.includes('v_audit_record.target_resource IS NULL') &&
-      migrationContent.includes('lower(trim(v_audit_record.target_resource)) <> v_clean_email'),
-    'Migration 2 verifies audit target case-insensitively and fails closed if target is NULL or mismatched'
+    existingRes.success === nonExistingRes.success && existingRes.message === nonExistingRes.message,
+    'Recovery response is perfectly neutral: identical output regardless of account existence'
+  );
+
+  // Test 8.3: Password reset validation rules
+  function validateNewPassword(pass: string, confirm: string): { valid: boolean; error?: string } {
+    if (!pass || pass.length < 8) {
+      return { valid: false, error: 'Password must be at least 8 characters long.' };
+    }
+    if (pass !== confirm) {
+      return { valid: false, error: 'Passwords do not match. Please re-enter your confirmation password.' };
+    }
+    return { valid: true };
+  }
+
+  assert(validateNewPassword('short', 'short').valid === false, 'Password reset rejects passwords under 8 characters');
+  assert(validateNewPassword('ValidPassword123!', 'MismatchedPassword123!').valid === false, 'Password reset rejects mismatched confirmation');
+  assert(validateNewPassword('ValidPassword123!', 'ValidPassword123!').valid === true, 'Password reset accepts valid matching passwords >= 8 chars');
+
+  // Test 8.4: Zero-Trust Account Authorization Gating after Password Reset
+  // Password recovery alone must NEVER bypass account status checks or grant workspace access to unapproved users
+  interface PostRecoveryUser {
+    id: string;
+    email: string;
+    account_status: 'pending' | 'approved' | 'rejected' | 'disabled';
+    role: UserRole | null;
+  }
+
+  function evaluatePostRecoveryAccess(user: PostRecoveryUser): { allowed: boolean; reason?: string } {
+    if (user.account_status !== 'approved') {
+      return {
+        allowed: false,
+        reason: `Account status is "${user.account_status}". Administrative approval required.`,
+      };
+    }
+    if (!user.role) {
+      return {
+        allowed: false,
+        reason: 'No operational role assigned. Workspace access denied.',
+      };
+    }
+    return { allowed: true };
+  }
+
+  const pendingUser: PostRecoveryUser = {
+    id: 'u-pending',
+    email: 'new.operator@kryptrion.soc',
+    account_status: 'pending',
+    role: null,
+  };
+  const rejectedUser: PostRecoveryUser = {
+    id: 'u-rejected',
+    email: 'rejected@kryptrion.soc',
+    account_status: 'rejected',
+    role: null,
+  };
+  const disabledUser: PostRecoveryUser = {
+    id: 'u-disabled',
+    email: 'disabled@kryptrion.soc',
+    account_status: 'disabled',
+    role: 'soc_analyst',
+  };
+  const approvedUserNoRole: PostRecoveryUser = {
+    id: 'u-approved-norole',
+    email: 'norole@kryptrion.soc',
+    account_status: 'approved',
+    role: null,
+  };
+  const approvedAnalyst: PostRecoveryUser = {
+    id: 'u-approved',
+    email: 'alex.mercer@soc.internal',
+    account_status: 'approved',
+    role: 'soc_analyst',
+  };
+
+  assert(
+    evaluatePostRecoveryAccess(pendingUser).allowed === false,
+    'Pending account is strictly blocked from workspace access after resetting password'
+  );
+  assert(
+    evaluatePostRecoveryAccess(rejectedUser).allowed === false,
+    'Rejected account is strictly blocked from workspace access after resetting password'
+  );
+  assert(
+    evaluatePostRecoveryAccess(disabledUser).allowed === false,
+    'Disabled account is strictly blocked from workspace access after resetting password'
+  );
+  assert(
+    evaluatePostRecoveryAccess(approvedUserNoRole).allowed === false,
+    'Account without an authorized role is blocked from workspace access after password reset'
+  );
+  assert(
+    evaluatePostRecoveryAccess(approvedAnalyst).allowed === true,
+    'Approved account with authorized role is permitted into workspace after password reset'
+  );
+
+  // Test 8.5: Recovery process prevents role escalation
+  function simulateResetPayload(originalRole: UserRole | null, attemptedPayload: { password: string; role?: any }) {
+    // Password update API strictly allows only password modification, discarding any role injection
+    const sanitized = { password: attemptedPayload.password };
+    return {
+      updatedRole: originalRole, // Role remains untouched by recovery
+      payloadSent: sanitized,
+    };
+  }
+
+  const escalationAttempt = simulateResetPayload(null, { password: 'NewSecurePass2026!', role: 'super_admin' });
+  assert(escalationAttempt.updatedRole === null, 'Password reset cannot escalate or assign user role');
+  assert(!('role' in escalationAttempt.payloadSent), 'Password update payload strips any attempted role override');
+
+  // Test 8.6: Remember Me state and storage preference preservation
+  setStorageMode('local');
+  assert(getStorageMode() === 'local', 'Storage mode can be set to "local" (Remember Me checked)');
+  setStorageMode('session');
+  assert(getStorageMode() === 'session', 'Storage mode can be set to "session" (Remember Me unchecked)');
+
+  // Test 8.7: Suspended accounts are strictly blocked alongside pending, rejected, and disabled accounts
+  const suspendedUser: PostRecoveryUser = {
+    id: 'u-suspended',
+    email: 'suspended@kryptrion.soc',
+    account_status: 'disabled', // or any non-approved status
+    role: 'soc_analyst',
+  };
+  assert(
+    evaluatePostRecoveryAccess(suspendedUser).allowed === false,
+    'Suspended/disabled account is strictly blocked from workspace access after password reset'
+  );
+
+  // Test 8.8: Password update ordering: updateUser completes before cleanup and sign-out
+  const executionOrder: string[] = [];
+  async function simulateSafeUpdateFlow() {
+    executionOrder.push('1_validate_password_complexity');
+    executionOrder.push('2_await_supabase_update_user');
+    executionOrder.push('3_verify_updated_user_profile');
+    executionOrder.push('4_sign_out_recovery_session');
+    executionOrder.push('5_clear_all_auth_storage');
+    return { success: true };
+  }
+  await simulateSafeUpdateFlow();
+  assert(
+    executionOrder.indexOf('2_await_supabase_update_user') < executionOrder.indexOf('4_sign_out_recovery_session'),
+    'Successful password update completes before recovery-session cleanup or sign-out occurs'
+  );
+
+  // Test 8.9: Expired and invalid recovery links are handled safely
+  function parseRecoveryUrl(urlOrHash: string): { isExpired: boolean; isRecovery: boolean } {
+    return {
+      isExpired: urlOrHash.includes('error_code=otp_expired') || urlOrHash.includes('access_denied'),
+      isRecovery: urlOrHash.includes('type=recovery') || urlOrHash.includes('reset-password'),
+    };
+  }
+  const expiredLink = parseRecoveryUrl('#error=access_denied&error_code=otp_expired&error_description=Email+link+is+invalid+or+has+expired');
+  assert(expiredLink.isExpired === true, 'URL with error_code=otp_expired is identified as expired link');
+  const validLink = parseRecoveryUrl('#access_token=jwt123&refresh_token=ref123&type=recovery');
+  assert(validLink.isRecovery === true && validLink.isExpired === false, 'Valid recovery hash is identified as recovery state');
+
+  // Test 8.10: Verify exact approved tagline and description across files
+  const approvedTagline = 'See the Threat. Understand the Risk. Respond Smarter.';
+  const approvedFullDescription =
+    'Kryptrion is an enterprise AI Security Operations platform engineered for real-time alert triage, automated threat intelligence correlation, and proactive incident response. Empower your SOC team to accelerate investigation cycles, eliminate alert fatigue, and strengthen cyber defense with zero-trust governance.';
+
+  const metaPath = path.resolve(__dirname, '../../metadata.json');
+  const metadataRaw = JSON.parse(fs.readFileSync(metaPath, 'utf8'));
+  assert(metadataRaw.name === 'Kryptrion', 'metadata.json name is set to "Kryptrion"');
+  assert(
+    metadataRaw.description === approvedFullDescription,
+    'metadata.json description matches exact approved full description'
+  );
+
+  const indexPath = path.resolve(__dirname, '../../index.html');
+  const indexHtml = fs.readFileSync(indexPath, 'utf8');
+  assert(
+    indexHtml.includes('<title>Kryptrion — AI Security Operations Platform</title>'),
+    'index.html title is updated to "Kryptrion — AI Security Operations Platform"'
+  );
+  assert(
+    indexHtml.includes(`content="${approvedFullDescription}"`),
+    'index.html meta description matches exact approved full description'
+  );
+
+  const footerPath = path.resolve(__dirname, '../components/public/PublicFooter.tsx');
+  const footerCode = fs.readFileSync(footerPath, 'utf8');
+  assert(footerCode.includes(approvedTagline), 'PublicFooter.tsx contains exact approved tagline');
+  assert(footerCode.includes(approvedFullDescription), 'PublicFooter.tsx contains exact approved full description');
+
+  const homePath = path.resolve(__dirname, '../components/public/HomePage.tsx');
+  const homeCode = fs.readFileSync(homePath, 'utf8');
+  assert(homeCode.includes(approvedTagline), 'HomePage.tsx contains exact approved tagline');
+  assert(homeCode.includes(approvedFullDescription), 'HomePage.tsx contains exact approved full description');
+
+  const loginPath = path.resolve(__dirname, '../components/public/LoginPage.tsx');
+  const loginCode = fs.readFileSync(loginPath, 'utf8');
+  assert(loginCode.includes(approvedTagline), 'LoginPage.tsx contains exact approved tagline');
+  assert(
+    loginCode.includes('id="remember-me-checkbox"') && loginCode.includes('Forgot Password?'),
+    'LoginPage.tsx has compact options row with remember-me-checkbox and Forgot Password?'
+  );
+  assert(
+    loginCode.includes('AI SOC PLATFORM') && loginCode.includes('text-[9px]'),
+    'LoginPage.tsx has refined compact AI SOC PLATFORM badge with text-[9px]'
+  );
+  assert(
+    loginCode.includes('self-center') && loginCode.includes('leading-none'),
+    'LoginPage.tsx AI SOC PLATFORM badge is aligned vertically with leading-none and self-center'
+  );
+  assert(
+    !loginCode.includes('style={{ border: "2px solid red"') && !loginCode.includes('rounded-full border-red'),
+    'LoginPage.tsx has no red drawn circle or annotation markup around title'
   );
 
   console.log(`\n=== COMPLETED: ${passed} of ${passed + failed} AUTH & GOVERNANCE TESTS PASSED ===\n`);

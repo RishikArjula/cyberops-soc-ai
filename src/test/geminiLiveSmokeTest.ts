@@ -174,23 +174,6 @@ export async function runGeminiSmokeTest(
       return outcome;
     }
 
-    if (err instanceof GeminiUnavailableError) {
-      console.error(`  [FAIL] Service unavailable error: ${err.message}`);
-      console.log('[STAGE 3 - CONTENT GENERATION] FAIL: Service unavailable.');
-      console.log('=== SMOKE TEST RESULT: FAILED AT STAGE 3 (Exit Code: 1) ===');
-
-      const outcome: SmokeTestOutcome = {
-        stage1Passed: true,
-        stage2Passed: true,
-        stage3Passed: false,
-        stage3Status: 'FAILED',
-        exitCode: 1,
-        errorMessage: err.message,
-      };
-      if (exitProcess) process.exit(1);
-      return outcome;
-    }
-
     const message = err instanceof Error ? err.message : String(err);
 
     // Sanitize any URL query strings or sensitive patterns from logs
@@ -201,7 +184,8 @@ export async function runGeminiSmokeTest(
     if (
       sanitizedMessage.includes('503') ||
       sanitizedMessage.includes('high demand') ||
-      sanitizedMessage.includes('UNAVAILABLE')
+      sanitizedMessage.includes('UNAVAILABLE') ||
+      (err instanceof GeminiUnavailableError && err.status === 503)
     ) {
       console.log('  [OBSERVATION] Upstream Google GenAI returned HTTP 503 UNAVAILABLE.');
       console.log('  [OBSERVATION] Gateway accepted authentication credentials, but model capacity is constrained.');
@@ -218,6 +202,23 @@ export async function runGeminiSmokeTest(
         errorMessage: sanitizedMessage,
       };
       if (exitProcess) process.exit(2);
+      return outcome;
+    }
+
+    if (err instanceof GeminiUnavailableError) {
+      console.error(`  [FAIL] Service unavailable error: ${err.message}`);
+      console.log('[STAGE 3 - CONTENT GENERATION] FAIL: Service unavailable.');
+      console.log('=== SMOKE TEST RESULT: FAILED AT STAGE 3 (Exit Code: 1) ===');
+
+      const outcome: SmokeTestOutcome = {
+        stage1Passed: true,
+        stage2Passed: true,
+        stage3Passed: false,
+        stage3Status: 'FAILED',
+        exitCode: 1,
+        errorMessage: err.message,
+      };
+      if (exitProcess) process.exit(1);
       return outcome;
     }
 

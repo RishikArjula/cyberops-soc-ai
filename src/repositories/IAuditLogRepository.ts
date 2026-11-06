@@ -41,6 +41,17 @@ export interface IAuditLogRepository {
   createTask(user: UserProfile, task: Omit<IncidentTask, 'id' | 'createdAt'>): Promise<IncidentTask>;
 
   /**
+   * Reviews an IT Operations remediation task (Approve or Request Rework).
+   * Restricted strictly to SOC Analysts.
+   */
+  reviewRemediationTask(
+    user: UserProfile,
+    taskId: string,
+    decision: 'approved' | 'rework_requested',
+    notes: string
+  ): Promise<IncidentTask>;
+
+  /**
    * Records and confirms a platform governance audit log.
    */
   recordGovernanceAction(

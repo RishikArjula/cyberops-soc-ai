@@ -11,11 +11,33 @@
 
 import { IAlertRepository } from '../IAlertRepository';
 import { SecurityAlert, AlertFilterOptions, AlertStatus } from '../../types/alert';
+import { IncidentTask } from '../../types/audit';
 import { UserProfile, AccessDeniedError } from '../../types/auth';
 import { AuthorizationService } from '../../services/authorizationService';
 import { getSupabaseClient } from '../../lib/supabaseClient';
+import { normalizeAttackId } from '../../utils/mitreUtils';
+import { checkAlertClosureEligibility } from '../../utils/remediationReview';
+
+function mapRowToIncidentTask(row: any): IncidentTask {
+  return {
+    id: row.id,
+    title: row.title,
+    description: row.description,
+    assignedRole: row.assigned_role,
+    status: row.status,
+    priority: row.priority,
+    createdAt: row.created_at,
+    targetAsset: row.target_asset,
+    suggestedActionType: row.suggested_action_type || undefined,
+    associatedAlertId: row.associated_alert_id || undefined,
+    completedAt: row.completed_at || undefined,
+    completedBy: row.completed_by || undefined,
+    completionNotes: row.completion_notes || undefined,
+  };
+}
 
 function mapRowToSecurityAlert(row: any, notes: string[] = []): SecurityAlert {
+  const normAttackId = normalizeAttackId(row.mitre_technique_id);
   return {
     id: row.id,
     title: row.title,
@@ -28,6 +50,7 @@ function mapRowToSecurityAlert(row: any, notes: string[] = []): SecurityAlert {
     hostName: row.host_name,
     userName: row.user_name || undefined,
     mitreTechniqueId: row.mitre_technique_id || undefined,
+    attack_id: normAttackId || undefined,
     mitreTacticId: row.mitre_tactic_id || undefined,
     confidenceScore: Number(row.confidence_score),
     evidence: typeof row.evidence === 'object' && row.evidence !== null ? row.evidence : {},
@@ -190,11 +213,41 @@ export class SupabaseAlertRepository implements IAlertRepository {
 
   /**
    * Updates alert triage status. Requires 'alert:triage' permission and approved soc_analyst role.
+   * Enforces Incident Closure Guard: blocks transition to 'resolved' if any linked remediation tasks are unapproved.
    */
-  async updateAlertStatus(user: UserProfile, id: string, status: AlertStatus): Promise<SecurityAlert> {
+  async updateAlertStatus(
+    user: UserProfile,
+    id: string,
+    status: AlertStatus,
+    tasks?: IncidentTask[]
+  ): Promise<SecurityAlert> {
     AuthorizationService.assertPermission(user, 'alert:triage');
 
     const client = getSupabaseClient();
+
+    // Incident Closure Guard: prevent resolution if associated remediation tasks are not all approved
+    if (status === 'resolved') {
+      let linkedTasks: IncidentTask[] = tasks || [];
+      if (!tasks) {
+        const { data: taskRows, error: taskErr } = await client
+          .from('incident_tasks')
+          .select('*')
+          .eq('associated_alert_id', id);
+
+        if (!taskErr && taskRows) {
+          linkedTasks = taskRows.map(mapRowToIncidentTask);
+        }
+      }
+
+      const eligibility = checkAlertClosureEligibility(id, linkedTasks);
+      if (!eligibility.eligible) {
+        throw new Error(
+          eligibility.reason ||
+            `Cannot resolve alert ${id}: all associated remediation tasks must have explicit SOC Analyst approval before closure.`
+        );
+      }
+    }
+
     const { data, error } = await client
       .from('alerts')
       .update({
@@ -235,6 +288,48 @@ export class SupabaseAlertRepository implements IAlertRepository {
     }
 
     return (await this.getAlertByIdForUser(user, id))!;
+  }
+
+  /**
+   * Controlled simulation alert handler:
+   * Inserts or updates the controlled simulated alert in public.alerts for authorized callers.
+   * Enforces RLS boundaries (requires approved soc_analyst role) and prevents duplicate
+   * rows by upserting on primary key (id). Propagates any database errors directly.
+   */
+  async addSimulatedAlert(alert: SecurityAlert): Promise<SecurityAlert> {
+    const client = getSupabaseClient();
+
+    const { data, error } = await client
+      .from('alerts')
+      .upsert(
+        {
+          id: alert.id,
+          title: alert.title,
+          description: alert.description,
+          severity: alert.severity,
+          status: alert.status,
+          detected_at: alert.detectedAt,
+          source_ip: alert.sourceIp,
+          destination_ip: alert.destinationIp,
+          host_name: alert.hostName,
+          user_name: alert.userName,
+          mitre_technique_id: alert.mitreTechniqueId,
+          mitre_tactic_id: alert.mitreTacticId,
+          confidence_score: alert.confidenceScore,
+          evidence: alert.evidence,
+          is_synthetic: true,
+          provenance: alert.provenance,
+        },
+        { onConflict: 'id' }
+      )
+      .select()
+      .single();
+
+    if (error) {
+      throw new Error(`[SupabaseAlertRepository] Failed to persist simulated alert: ${error.message}`);
+    }
+
+    return mapRowToSecurityAlert(data || alert);
   }
 
   /**

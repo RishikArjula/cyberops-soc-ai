@@ -18,7 +18,6 @@ import { DeterministicTriageService } from '../services/deterministicTriageServi
 import { LocalAlertRepository } from '../repositories/local/LocalAlertRepository';
 import { LocalAuditLogRepository } from '../repositories/local/LocalAuditLogRepository';
 import { INITIAL_SYNTHETIC_ALERTS } from '../data/syntheticAlerts';
-import { SAMPLE_NETWORK_FLOWS } from '../data/networkFlows';
 import { DEMO_PERSONAS, UserProfile, AccessDeniedError } from '../types/auth';
 import { SecurityAlert, AlertStatus } from '../types/alert';
 
@@ -199,18 +198,11 @@ async function main() {
     assert(newTask.status === 'in_progress', 'Initial status must be in_progress');
   });
 
-  console.log('\n-- Area 5: Network Flow Telemetry (CIC-IDS2017) --');
+  console.log('\n-- Area 5: Network Flow Telemetry Elimination --');
 
-  runTest('Test 10: SAMPLE_NETWORK_FLOWS adheres to Canadian Institute for Cybersecurity benchmark', () => {
-    assert(SAMPLE_NETWORK_FLOWS.length > 0, 'Network flows must be populated');
-    const flow = SAMPLE_NETWORK_FLOWS[0];
-    assert(typeof flow.flowId === 'string' && flow.flowId.length > 0, 'flowId exists');
-    assert(typeof flow.sourceIp === 'string', 'sourceIp exists');
-    assert(typeof flow.destinationIp === 'string', 'destinationIp exists');
-    assert(typeof flow.flowDurationMs === 'number', 'flowDurationMs exists');
-    assert(typeof flow.flowBytesPerSec === 'number', 'flowBytesPerSec exists');
-    assert(typeof flow.synFlagCount === 'number', 'synFlagCount exists');
-    assert(['BENIGN', 'SSH-Patator', 'Bot', 'DoS Slowloris'].includes(flow.label), 'Known benchmark label');
+  runTest('Test 10: Network Flow Telemetry is strictly eliminated from SOC Analyst authorized views and permissions', () => {
+    assert(!AuthorizationService.isViewAuthorized('soc_analyst', 'network' as any), 'SOC Analyst must not have network view');
+    assert(!AuthorizationService.hasPermission('soc_analyst', 'telemetry:read' as any), 'SOC Analyst must not have telemetry:read permission');
   });
 
   console.log('\n-- Area 6: Containment Audit Trail & Scoped Evidence --');
@@ -234,11 +226,12 @@ async function main() {
 
   console.log('\n-- Area 8: Role Isolation & Direct-Route Fallbacks --');
 
-  runTest('Test 13: SOC Analyst has exactly 6 authorized sidebar modules', () => {
-    const analystSidebarViews = ['overview', 'alerts', 'investigations', 'playbooks', 'network', 'audit'];
+  runTest('Test 13: SOC Analyst has exactly 6 authorized knowledge modules', () => {
+    const analystSidebarViews = ['overview', 'strategies', 'analytics', 'log_sources', 'data_components', 'mitre_explorer'];
     for (const v of analystSidebarViews) {
       assert(AuthorizationService.isViewAuthorized('soc_analyst', v), `soc_analyst must be authorized for ${v}`);
     }
+    assert(!AuthorizationService.isViewAuthorized('soc_analyst', 'network' as any), 'soc_analyst denied network');
     assert(!AuthorizationService.isViewAuthorized('soc_analyst', 'admin'), 'soc_analyst denied admin');
     assert(!AuthorizationService.isViewAuthorized('soc_analyst', 'mitre'), 'soc_analyst denied mitre');
     assert(!AuthorizationService.isViewAuthorized('soc_analyst', 'tasks'), 'soc_analyst denied tasks');

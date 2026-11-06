@@ -18,7 +18,6 @@ import { UserProfile, UserRole, AccountStatus, ROLE_METADATA } from '../types/au
 import { isSupabaseConfigured, getSupabaseConfigurationStatus, SupabaseRuntimeMode } from '../lib/supabaseClient';
 import { getRepositories } from '../repositories';
 import { MITRE_PROVENANCE_INFO, AUTHENTIC_MITRE_TACTICS, AUTHENTIC_MITRE_TECHNIQUES, AUTHENTIC_MITRE_MITIGATIONS } from '../data/mitreData';
-import { SAMPLE_NETWORK_FLOWS } from '../data/networkFlows';
 import { fetchCopilotStatus } from './copilotClientService';
 
 export interface AdminOverviewStats {
@@ -348,23 +347,7 @@ export function buildDataSourceInventory(options: {
     isOperationalData: false,
   };
 
-  // 3. CIC-IDS2017 Network Flow Telemetry
-  const cicIdsItem: DataSourceItem = {
-    id: 'cic_ids_telemetry',
-    name: 'CIC-IDS2017 Network Flow Telemetry',
-    type: 'telemetry_benchmark',
-    typeLabel: 'Network Telemetry Benchmark',
-    provenanceType: 'cic_ids_sample',
-    provenanceLabel: 'CIC-IDS2017 Schema',
-    scopeNotice: 'Synthetic baseline records structured to the Canadian Institute for Cybersecurity benchmark schema.',
-    recordCountLabel: `${SAMPLE_NETWORK_FLOWS.length} Flow Records (BENIGN, SSH-Patator, Bot, DoS Slowloris)`,
-    isolationNotice: 'Accessible to authorized operational roles (IT Operations, SOC Analyst, Security Engineer).',
-    state: 'Synthetic Benchmark',
-    stateDetail: 'Synthetic demonstration flows structured to standard schema; does NOT represent authentic live packet capture.',
-    isOperationalData: false,
-  };
-
-  // 4. Audit Log & Governance Ledger
+  // 3. Audit Log & Governance Ledger
   const isSupabaseAudit = repoBundle.auditRepo.constructor.name.includes('Supabase');
   const auditItem: DataSourceItem = {
     id: 'audit_ledger',
@@ -381,7 +364,7 @@ export function buildDataSourceInventory(options: {
     isOperationalData: false,
   };
 
-  // 5. AI Security Copilot Engine
+  // 4. AI Security Copilot Engine
   const copilotItem: DataSourceItem = {
     id: 'copilot_engine',
     name: 'AI Security Copilot Advisory Engine',
@@ -397,5 +380,5 @@ export function buildDataSourceInventory(options: {
     isOperationalData: false,
   };
 
-  return [primaryDbItem, mitreItem, cicIdsItem, auditItem, copilotItem];
+  return [primaryDbItem, mitreItem, auditItem, copilotItem];
 }

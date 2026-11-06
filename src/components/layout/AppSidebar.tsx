@@ -10,17 +10,30 @@ import {
   LayoutDashboard,
   Search,
   BookOpen,
+  FileCode,
+  TrendingUp,
+  Database,
+  ShieldCheck,
 } from 'lucide-react';
 import { UserRole, ROLE_METADATA, UserProfile } from '../../types/auth';
+import { getRepositories } from '../../repositories';
 
 export type WorkspaceView =
   | 'overview'
+  | 'strategies'
+  | 'analytics'
+  | 'log_sources'
+  | 'data_components'
+  | 'mitre_explorer'
+  | 'itops_overview'
+  | 'itops_techniques'
+  | 'itops_mitigations'
+  | 'seceng_overview'
   | 'alerts'
   | 'investigations'
   | 'playbooks'
   | 'mitre'
   | 'tasks'
-  | 'network'
   | 'audit'
   | 'profile'
   | 'admin';
@@ -60,47 +73,98 @@ export const AppSidebar: React.FC<AppSidebarProps> = ({
       authorizedRoles: ['super_admin'],
       primaryRole: 'super_admin',
     },
+    // SOC Analyst Six Independent Knowledge Modules
     {
       id: 'overview',
-      label: 'SOC Overview',
-      description: 'Triage metrics & operational posture',
+      label: 'SOC Analytics Overview',
+      description: 'Cross-dimensional telemetry & knowledge posture',
       icon: <LayoutDashboard className="w-4 h-4 text-indigo-600 dark:text-indigo-400" />,
       authorizedRoles: ['soc_analyst'],
       primaryRole: 'soc_analyst',
     },
     {
-      id: 'alerts',
-      label: currentUser.role === 'it_operations' ? 'Scoped Incident Alerts' : 'Alert Triage Queue',
-      description: 'Incoming alerts & telemetry evidence',
-      icon: <AlertOctagon className="w-4 h-4 text-rose-600 dark:text-rose-400" />,
-      badgeCount: alertCount,
-      authorizedRoles: ['soc_analyst', 'security_engineer', 'it_operations'],
-      primaryRole: 'soc_analyst',
-    },
-    {
-      id: 'investigations',
-      label: 'Deep Investigation',
-      description: 'Forensic evidence & note correlation',
-      icon: <Search className="w-4 h-4 text-sky-600 dark:text-sky-400" />,
+      id: 'strategies',
+      label: 'Detection Strategy Analytics',
+      description: 'Technique coverage & strategy blueprints',
+      icon: <FileCode className="w-4 h-4 text-cyan-600 dark:text-cyan-400" />,
       authorizedRoles: ['soc_analyst'],
       primaryRole: 'soc_analyst',
     },
     {
-      id: 'playbooks',
-      label: 'Response Playbooks',
-      description: 'Containment simulation SOPs',
-      icon: <BookOpen className="w-4 h-4 text-emerald-600 dark:text-emerald-400" />,
+      id: 'analytics',
+      label: 'Analytic Analytics',
+      description: 'SIEM & EDR detection rules and coverage',
+      icon: <TrendingUp className="w-4 h-4 text-emerald-600 dark:text-emerald-400" />,
       authorizedRoles: ['soc_analyst'],
       primaryRole: 'soc_analyst',
+    },
+    {
+      id: 'log_sources',
+      label: 'Log Source Analytics',
+      description: 'Telemetry data feeds & technique mappings',
+      icon: <Server className="w-4 h-4 text-amber-600 dark:text-amber-400" />,
+      authorizedRoles: ['soc_analyst'],
+      primaryRole: 'soc_analyst',
+    },
+    {
+      id: 'data_components',
+      label: 'Data Component Analytics',
+      description: 'Observable telemetry elements & data context',
+      icon: <Database className="w-4 h-4 text-purple-600 dark:text-purple-400" />,
+      authorizedRoles: ['soc_analyst'],
+      primaryRole: 'soc_analyst',
+    },
+    {
+      id: 'mitre_explorer',
+      label: 'MITRE ATT&CK Explorer',
+      description: 'Enterprise tactics, techniques & defenses',
+      icon: <ShieldCheck className="w-4 h-4 text-blue-600 dark:text-cyan-400" />,
+      authorizedRoles: ['soc_analyst'],
+      primaryRole: 'soc_analyst',
+    },
+    // IT Operations Three Dedicated Knowledge Modules
+    {
+      id: 'itops_overview',
+      label: 'IT Operations Overview',
+      description: 'Computing platform coverage & defensive posture',
+      icon: <LayoutDashboard className="w-4 h-4 text-amber-600 dark:text-amber-400" />,
+      authorizedRoles: ['it_operations'],
+      primaryRole: 'it_operations',
+    },
+    {
+      id: 'itops_techniques',
+      label: 'Technique & Platform Explorer',
+      description: 'Techniques categorized by computing environment',
+      icon: <Server className="w-4 h-4 text-cyan-600 dark:text-cyan-400" />,
+      authorizedRoles: ['it_operations'],
+      primaryRole: 'it_operations',
+    },
+    {
+      id: 'itops_mitigations',
+      label: 'Mitigation Explorer',
+      description: 'Preventative mitigations & protected techniques',
+      icon: <ShieldCheck className="w-4 h-4 text-emerald-600 dark:text-emerald-400" />,
+      authorizedRoles: ['it_operations'],
+      primaryRole: 'it_operations',
+    },
+    // Security Engineer Dedicated Modules
+    {
+      id: 'seceng_overview',
+      label: 'Overview',
+      description: 'MITRE technique & mitigation reference posture',
+      icon: <LayoutDashboard className="w-4 h-4 text-cyan-600 dark:text-cyan-400" />,
+      authorizedRoles: ['security_engineer'],
+      primaryRole: 'security_engineer',
     },
     {
       id: 'mitre',
-      label: 'Threat Intelligence (MITRE)',
+      label: 'Threat Intelligence (MITRE ATT&CK)',
       description: 'Enterprise tactics, techniques & defenses',
       icon: <Layers className="w-4 h-4 text-blue-600 dark:text-cyan-400" />,
       authorizedRoles: ['security_engineer'],
       primaryRole: 'security_engineer',
     },
+    // Operational Roles Navigation Modules
     {
       id: 'tasks',
       label: 'Incident Response Tasks',
@@ -111,11 +175,26 @@ export const AppSidebar: React.FC<AppSidebarProps> = ({
       primaryRole: 'it_operations',
     },
     {
-      id: 'network',
-      label: 'Network Flow Telemetry',
-      description: 'CIC-IDS2017 structured flow analysis',
-      icon: <Activity className="w-4 h-4 text-teal-600 dark:text-emerald-400" />,
+      id: 'alerts',
+      label: currentUser.role === 'it_operations' ? 'Scoped Incident Alerts' : 'Alert Triage Queue',
+      description: 'Incoming alerts & telemetry evidence',
+      icon: <AlertOctagon className="w-4 h-4 text-rose-600 dark:text-rose-400" />,
+      badgeCount: alertCount,
       authorizedRoles: ['soc_analyst', 'security_engineer', 'it_operations'],
+    },
+    {
+      id: 'investigations',
+      label: 'Deep Investigation',
+      description: 'Forensic evidence & note correlation',
+      icon: <Search className="w-4 h-4 text-sky-600 dark:text-sky-400" />,
+      authorizedRoles: ['soc_analyst'],
+    },
+    {
+      id: 'playbooks',
+      label: 'Response Playbooks',
+      description: 'Containment simulation SOPs',
+      icon: <BookOpen className="w-4 h-4 text-emerald-600 dark:text-emerald-400" />,
+      authorizedRoles: ['soc_analyst'],
     },
     {
       id: 'audit',
@@ -197,17 +276,38 @@ export const AppSidebar: React.FC<AppSidebarProps> = ({
       </nav>
 
       {/* Bottom Data Provenance summary */}
-      <div className="p-3 border-t border-slate-200 dark:border-slate-800 bg-slate-50/80 dark:bg-slate-950/60 text-[11px] text-slate-500 dark:text-slate-400 space-y-1">
-        <div className="flex items-center gap-1.5 text-slate-700 dark:text-slate-300 font-semibold text-[10px] font-mono uppercase">
-          <Shield className="w-3.5 h-3.5 text-blue-600 dark:text-cyan-400" />
-          DATA PROVENANCE (PROTOTYPE)
-        </div>
-        <p className="text-[10px]">
-          &bull; MITRE ATT&CK: <span className="text-slate-700 dark:text-slate-300 font-mono">Curated v14.1 Subset</span><br />
-          &bull; Telemetry: <span className="text-slate-700 dark:text-slate-300 font-mono">Synthetic CIC-IDS2017</span><br />
-          &bull; Alerts: <span className="text-purple-600 dark:text-purple-400 font-mono">Synthetic Scenarios</span>
-        </p>
-      </div>
+      {(() => {
+        let isLive = false;
+        try {
+          const repoBundle = getRepositories();
+          isLive = repoBundle.mode === 'live_supabase' || repoBundle.isLive;
+        } catch {
+          isLive = false;
+        }
+
+        return (
+          <div className="p-3 border-t border-slate-200 dark:border-slate-800 bg-slate-50/80 dark:bg-slate-950/60 text-[11px] text-slate-500 dark:text-slate-400 space-y-1">
+            <div className="flex items-center gap-1.5 font-semibold text-[10px] font-mono uppercase">
+              {isLive ? (
+                <>
+                  <Database className="w-3.5 h-3.5 text-emerald-600 dark:text-emerald-400" />
+                  <span className="text-emerald-700 dark:text-emerald-300">DATA PROVENANCE: LIVE SUPABASE POSTGRESQL</span>
+                </>
+              ) : (
+                <>
+                  <Shield className="w-3.5 h-3.5 text-amber-600 dark:text-amber-400" />
+                  <span className="text-amber-700 dark:text-amber-300">DATA PROVENANCE: LOCAL DEMO STORE</span>
+                </>
+              )}
+            </div>
+            <p className="text-[10px] leading-relaxed">
+              &bull; Operational Data: <span className="text-slate-700 dark:text-slate-300 font-mono">{isLive ? 'Live Supabase RLS Store' : 'Local Demo Repository'}</span><br />
+              &bull; MITRE ATT&CK: <span className="text-slate-700 dark:text-slate-300 font-mono">Curated v14.1 Taxonomy</span><br />
+              &bull; Telemetry: <span className="text-slate-700 dark:text-slate-300 font-mono">Synthetic CIC-IDS2017</span>
+            </p>
+          </div>
+        );
+      })()}
     </aside>
   );
 };

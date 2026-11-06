@@ -21,6 +21,7 @@ export interface CopilotChatRequest {
 
 export interface CopilotChatResponse {
   response: string;
+  text?: string;
   role: UserRole;
   contextType: CopilotContextType;
   entityId?: string;

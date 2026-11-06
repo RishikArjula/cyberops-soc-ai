@@ -1,20 +1,29 @@
-import React, { useState } from 'react';
+import React, { useState, useMemo } from 'react';
 import { SecurityAlert, AlertStatus } from '../../types/alert';
-import { UserRole } from '../../types/auth';
-import { ResponseActionType } from '../../types/audit';
+import { UserRole, UserProfile } from '../../types/auth';
+import { ResponseActionType, IncidentTask } from '../../types/audit';
 import { MitreTechnique, MitreMitigation } from '../../types/mitre';
-import { NetworkFlowRecord } from '../../types/networkFlow';
 import { DeterministicTriageRecommendation } from '../../types/triage';
 import { SeverityIndicator } from '../common/SeverityIndicator';
 import { ProvenanceBadge } from '../common/ProvenanceBadge';
 import { Button } from '../common/Button';
 import { DESIGN_TOKENS } from '../../constants/designTokens';
+import { formatAttackIdDisplay, normalizeAttackId } from '../../utils/mitreUtils';
+import { SocAnalystKnowledgeRecord } from '../../services/knowledgeService';
+import { lookupSocAnalystKnowledgeForTechnique } from '../../services/relationshipService';
+import { CreateTaskModal } from './CreateTaskModal';
+import { RequestReworkModal } from './RequestReworkModal';
+import { ApproveRemediationModal } from './ApproveRemediationModal';
+import {
+  getTaskReviewState,
+  parseRemediationHistory,
+  checkAlertClosureEligibility,
+} from '../../utils/remediationReview';
 import {
   X,
   Cpu,
   Terminal,
   Layers,
-  Activity,
   FileEdit,
   ShieldAlert,
   CheckCircle2,
@@ -24,6 +33,12 @@ import {
   WifiOff,
   Database,
   ArrowRight,
+  Activity,
+  FileSearch,
+  ClipboardList,
+  RefreshCw,
+  CheckSquare,
+  History,
 } from 'lucide-react';
 
 interface AlertDetailDrawerProps {
@@ -33,10 +48,14 @@ interface AlertDetailDrawerProps {
   onAddNote: (alertId: string, note: string) => Promise<void>;
   mitreTechnique: MitreTechnique | null;
   mitigations: MitreMitigation[];
-  networkFlow: NetworkFlowRecord | null;
   triageRecommendation: DeterministicTriageRecommendation;
   currentRole: UserRole;
   onInitiateSimulatedAction: (actionType: ResponseActionType, target: string) => void;
+  socKnowledge?: SocAnalystKnowledgeRecord[];
+  currentUser?: UserProfile;
+  tasks?: IncidentTask[];
+  onCreateTask?: (taskData: Omit<IncidentTask, 'id' | 'createdAt'>) => Promise<IncidentTask>;
+  onReviewTask?: (taskId: string, decision: 'approved' | 'rework_requested', notes: string) => Promise<void>;
 }
 
 export const AlertDetailDrawer: React.FC<AlertDetailDrawerProps> = ({
@@ -46,23 +65,52 @@ export const AlertDetailDrawer: React.FC<AlertDetailDrawerProps> = ({
   onAddNote,
   mitreTechnique,
   mitigations,
-  networkFlow,
   triageRecommendation,
   currentRole,
   onInitiateSimulatedAction,
+  socKnowledge = [],
+  currentUser,
+  tasks = [],
+  onCreateTask,
+  onReviewTask,
 }) => {
-  const [activeTab, setActiveTab] = useState<'triage' | 'evidence' | 'mitre' | 'network' | 'notes'>('triage');
+  const [activeTab, setActiveTab] = useState<'triage' | 'evidence' | 'mitre' | 'notes' | 'tasks'>('triage');
   const [newNote, setNewNote] = useState('');
   const [isUpdating, setIsUpdating] = useState(false);
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
+  const [closureBlockedMessage, setClosureBlockedMessage] = useState<string | null>(null);
+  const [isCreateTaskModalOpen, setIsCreateTaskModalOpen] = useState(false);
+  const [selectedTaskForRework, setSelectedTaskForRework] = useState<IncidentTask | null>(null);
+  const [selectedTaskForApproval, setSelectedTaskForApproval] = useState<IncidentTask | null>(null);
+
+  const linkedTasks = useMemo(() => tasks.filter((t) => t.associatedAlertId === alert.id), [tasks, alert.id]);
+
+  const attackId = alert.attack_id || normalizeAttackId(alert.mitreTechniqueId);
+  const socKnowledgeDetails = useMemo(() => {
+    if (!attackId || !socKnowledge || socKnowledge.length === 0) return null;
+    return lookupSocAnalystKnowledgeForTechnique(attackId, socKnowledge);
+  }, [attackId, socKnowledge]);
 
   const handleStatusChange = async (newStatus: AlertStatus) => {
     setIsUpdating(true);
     setStatusMessage(null);
+    setClosureBlockedMessage(null);
+
+    // Requirement 7: When an alert has associated remediation tasks, require all of them
+    // to have explicit SOC Analyst approval before allowing the alert to become resolved.
+    if (newStatus === 'resolved') {
+      const eligibility = checkAlertClosureEligibility(alert.id, tasks);
+      if (!eligibility.eligible) {
+        setIsUpdating(false);
+        setClosureBlockedMessage(eligibility.reason || 'All associated remediation tasks must be approved by a SOC Analyst before this alert can be resolved.');
+        return;
+      }
+    }
+
     try {
       await onUpdateStatus(alert.id, newStatus);
       setStatusMessage(`Status updated to "${newStatus.replace('_', ' ').toUpperCase()}"`);
-      setTimeout(() => setStatusMessage(null), 3000);
+      setTimeout(() => setStatusMessage(null), 3500);
     } catch (e: any) {
       setStatusMessage(`Failed: ${e.message}`);
     } finally {
@@ -92,7 +140,11 @@ export const AlertDetailDrawer: React.FC<AlertDetailDrawerProps> = ({
               {alert.id}
             </span>
             <SeverityIndicator severity={alert.severity} />
-            <ProvenanceBadge type="synthetic_demo" label="DEMO ALERT" />
+            {alert.provenance?.includes('Controlled Simulation') ? (
+              <ProvenanceBadge type="controlled_simulation" label="CONTROLLED SIMULATION" />
+            ) : (
+              <ProvenanceBadge type="synthetic_demo" label="DEMO ALERT" />
+            )}
             <span className="text-[11px] font-mono text-slate-500 dark:text-slate-400">
               {new Date(alert.detectedAt).toUTCString()}
             </span>
@@ -105,13 +157,26 @@ export const AlertDetailDrawer: React.FC<AlertDetailDrawerProps> = ({
           </div>
         </div>
 
-        <button
-          onClick={onClose}
-          className="text-slate-400 hover:text-slate-900 dark:hover:text-slate-100 p-1.5 rounded hover:bg-slate-100 dark:hover:bg-slate-800 transition"
-          aria-label="Close investigation drawer"
-        >
-          <X className="w-5 h-5" />
-        </button>
+        <div className="flex items-center gap-2 shrink-0">
+          {currentRole === 'soc_analyst' && onCreateTask && (
+            <Button
+              size="xs"
+              variant="outline"
+              onClick={() => setIsCreateTaskModalOpen(true)}
+              className="flex items-center gap-1.5 text-amber-700 dark:text-amber-300 border-amber-300 dark:border-amber-700/80 hover:bg-amber-50 dark:hover:bg-amber-950/40 font-mono text-[11px]"
+            >
+              <ClipboardList className="w-3.5 h-3.5 text-amber-500" />
+              Create Response Task
+            </Button>
+          )}
+          <button
+            onClick={onClose}
+            className="text-slate-400 hover:text-slate-900 dark:hover:text-slate-100 p-1.5 rounded hover:bg-slate-100 dark:hover:bg-slate-800 transition cursor-pointer"
+            aria-label="Close investigation drawer"
+          >
+            <X className="w-5 h-5" />
+          </button>
+        </div>
       </div>
 
       {/* Tabs Bar */}
@@ -126,6 +191,17 @@ export const AlertDetailDrawer: React.FC<AlertDetailDrawerProps> = ({
         >
           <Cpu className="w-3.5 h-3.5 text-blue-600 dark:text-cyan-400" />
           Deterministic Triage
+        </button>
+        <button
+          onClick={() => setActiveTab('tasks')}
+          className={`flex items-center gap-1.5 px-3 py-2.5 border-b-2 font-medium transition cursor-pointer ${
+            activeTab === 'tasks'
+              ? 'border-blue-600 dark:border-cyan-400 text-blue-700 dark:text-cyan-300 bg-white dark:bg-slate-800/40 font-semibold'
+              : 'border-transparent text-slate-500 dark:text-slate-400 hover:text-slate-800 dark:hover:text-slate-200'
+          }`}
+        >
+          <ClipboardList className="w-3.5 h-3.5 text-amber-600 dark:text-amber-400" />
+          Response Tasks ({linkedTasks.length})
         </button>
         <button
           onClick={() => setActiveTab('evidence')}
@@ -147,18 +223,7 @@ export const AlertDetailDrawer: React.FC<AlertDetailDrawerProps> = ({
           }`}
         >
           <Layers className="w-3.5 h-3.5 text-blue-600 dark:text-blue-400" />
-          MITRE ATT&CK ({alert.mitreTechniqueId || 'N/A'})
-        </button>
-        <button
-          onClick={() => setActiveTab('network')}
-          className={`flex items-center gap-1.5 px-3 py-2.5 border-b-2 font-medium transition cursor-pointer ${
-            activeTab === 'network'
-              ? 'border-blue-600 dark:border-cyan-400 text-blue-700 dark:text-cyan-300 bg-white dark:bg-slate-800/40 font-semibold'
-              : 'border-transparent text-slate-500 dark:text-slate-400 hover:text-slate-800 dark:hover:text-slate-200'
-          }`}
-        >
-          <Activity className="w-3.5 h-3.5 text-amber-600 dark:text-amber-400" />
-          Network Telemetry
+          MITRE ATT&CK ({formatAttackIdDisplay(alert.attack_id || alert.mitreTechniqueId)})
         </button>
         <button
           onClick={() => setActiveTab('notes')}
@@ -169,7 +234,7 @@ export const AlertDetailDrawer: React.FC<AlertDetailDrawerProps> = ({
           }`}
         >
           <FileEdit className="w-3.5 h-3.5 text-purple-600 dark:text-purple-400" />
-          Notes & Triage ({alert.analystNotes.length})
+          {currentRole === 'soc_analyst' ? `Notes & Triage (${alert.analystNotes.length})` : 'Triage Status'}
         </button>
       </div>
 
@@ -303,6 +368,66 @@ export const AlertDetailDrawer: React.FC<AlertDetailDrawerProps> = ({
                 ))}
               </div>
             </div>
+
+            {/* IT Operations Response Tasks Summary */}
+            <div className="space-y-2 pt-2 border-t border-slate-200 dark:border-slate-800">
+              <div className="flex items-center justify-between">
+                <h4 className="text-xs font-mono uppercase font-bold text-slate-800 dark:text-slate-300 flex items-center gap-1.5">
+                  <ClipboardList className="w-3.5 h-3.5 text-amber-600 dark:text-amber-400" />
+                  Incident Response Tasks ({linkedTasks.length})
+                </h4>
+                {currentRole === 'soc_analyst' && onCreateTask && (
+                  <Button
+                    size="xs"
+                    variant="outline"
+                    onClick={() => setIsCreateTaskModalOpen(true)}
+                    className="flex items-center gap-1.5 text-amber-700 dark:text-amber-300 border-amber-300 dark:border-amber-700/80 hover:bg-amber-50 dark:hover:bg-amber-950/40 font-mono text-[11px]"
+                  >
+                    <ClipboardList className="w-3.5 h-3.5 text-amber-500" />
+                    Create Response Task
+                  </Button>
+                )}
+              </div>
+              <p className="text-[11px] text-slate-500 dark:text-slate-400">
+                Remediation and recovery tasks assigned to IT Operations for this alert.
+              </p>
+
+              {linkedTasks.length === 0 ? (
+                <div className="p-3 bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 rounded text-xs text-slate-500 dark:text-slate-400 italic">
+                  No incident response tasks assigned yet. Click "Create Response Task" to assign containment or recovery instructions to IT Operations.
+                </div>
+              ) : (
+                <div className="space-y-2">
+                  {linkedTasks.map((t) => (
+                    <div
+                      key={t.id}
+                      className="p-3 bg-slate-50 dark:bg-slate-950/80 border border-slate-200 dark:border-slate-800 rounded text-xs space-y-1.5"
+                    >
+                      <div className="flex items-center justify-between">
+                        <div className="flex items-center gap-2">
+                          <span className="font-mono font-bold text-amber-700 dark:text-amber-400">{t.id}</span>
+                          <span className="text-[10px] font-mono uppercase px-1.5 py-0.2 rounded font-bold bg-slate-200 dark:bg-slate-800 text-slate-700 dark:text-slate-300">
+                            {t.status.toUpperCase()}
+                          </span>
+                          <span className="text-[10px] font-mono uppercase px-1.5 py-0.2 rounded font-bold bg-amber-100 dark:bg-amber-950 text-amber-800 dark:text-amber-300">
+                            {t.priority.toUpperCase()}
+                          </span>
+                        </div>
+                        <span className="text-[10px] font-mono text-slate-500">
+                          {new Date(t.createdAt).toLocaleTimeString()}
+                        </span>
+                      </div>
+                      <div className="font-semibold text-slate-900 dark:text-slate-100">{t.title}</div>
+                      <p className="text-[11px] text-slate-600 dark:text-slate-400 line-clamp-2">{t.description}</p>
+                      <div className="text-[10px] font-mono text-slate-500 flex items-center justify-between pt-1 border-t border-slate-200 dark:border-slate-800">
+                        <span>Target: <strong className="text-slate-800 dark:text-slate-200">{t.targetAsset}</strong></span>
+                        <span>Role: <strong className="text-amber-600 dark:text-amber-400 uppercase">{t.assignedRole}</strong></span>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
           </div>
         )}
 
@@ -362,8 +487,15 @@ export const AlertDetailDrawer: React.FC<AlertDetailDrawerProps> = ({
         {activeTab === 'mitre' && (
           <div className="space-y-4">
             <div className="flex items-center justify-between">
-              <ProvenanceBadge type="authentic_mitre" label="MITRE ATT&CK v14.1 ENTERPRISE" />
-              {mitreTechnique?.sourceUrl && (
+              <ProvenanceBadge
+                type="authentic_mitre"
+                label={
+                  socKnowledgeDetails
+                    ? 'MITRE ATT&CK v14.1 ENTERPRISE (public.soc_analyst_knowledge)'
+                    : 'MITRE ATT&CK v14.1 ENTERPRISE'
+                }
+              />
+              {mitreTechnique?.sourceUrl ? (
                 <a
                   href={mitreTechnique.sourceUrl}
                   target="_blank"
@@ -372,32 +504,130 @@ export const AlertDetailDrawer: React.FC<AlertDetailDrawerProps> = ({
                 >
                   Official Reference <ExternalLink className="w-3 h-3" />
                 </a>
-              )}
+              ) : attackId ? (
+                <a
+                  href={`https://attack.mitre.org/techniques/${attackId.replace('.', '/')}/`}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="text-xs font-mono text-blue-600 dark:text-cyan-400 hover:underline flex items-center gap-1"
+                >
+                  Official Reference <ExternalLink className="w-3 h-3" />
+                </a>
+              ) : null}
             </div>
 
-            {mitreTechnique ? (
+            {socKnowledgeDetails || mitreTechnique ? (
               <div className="space-y-4">
+                {/* Technique Header & Overview */}
                 <div className="p-4 bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 rounded-lg space-y-2">
                   <div className="flex items-center gap-2">
                     <span className="font-mono text-xs font-bold text-blue-700 dark:text-cyan-300 bg-blue-50 dark:bg-cyan-950 px-2 py-0.5 rounded border border-blue-200 dark:border-cyan-800">
-                      {mitreTechnique.id}
+                      {formatAttackIdDisplay(attackId || mitreTechnique?.id)}
                     </span>
-                    <h3 className="text-sm font-bold text-slate-900 dark:text-slate-100">{mitreTechnique.name}</h3>
+                    <h3 className="text-sm font-bold text-slate-900 dark:text-slate-100">
+                      {socKnowledgeDetails?.techniqueName || mitreTechnique?.name}
+                    </h3>
                   </div>
-                  <p className="text-xs text-slate-700 dark:text-slate-300 leading-relaxed">{mitreTechnique.description}</p>
+                  <p className="text-xs text-slate-700 dark:text-slate-300 leading-relaxed">
+                    {socKnowledgeDetails?.techniqueDescription || mitreTechnique?.description}
+                  </p>
                   <div className="pt-2 flex flex-wrap gap-2 text-[10px] font-mono text-slate-500 dark:text-slate-400">
-                    <span>Platforms: <strong className="text-slate-700 dark:text-slate-300">{mitreTechnique.platforms.join(', ')}</strong></span>
+                    {socKnowledgeDetails?.tactics.length ? (
+                      <span>Tactics: <strong className="text-slate-700 dark:text-slate-300">{socKnowledgeDetails.tactics.join(', ')}</strong></span>
+                    ) : null}
+                    <span>Platforms: <strong className="text-slate-700 dark:text-slate-300">
+                      {socKnowledgeDetails?.platforms.length
+                        ? socKnowledgeDetails.platforms.join(', ')
+                        : mitreTechnique?.platforms.join(', ') || 'Enterprise'}
+                    </strong></span>
                   </div>
                 </div>
 
-                {/* Detection guidance */}
-                <div className="p-4 bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 rounded-lg space-y-1.5">
+                {/* Verified Detection Strategy */}
+                <div className="p-4 bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 rounded-lg space-y-2">
                   <h4 className="text-xs font-mono uppercase font-bold text-slate-800 dark:text-slate-200 flex items-center gap-1.5">
                     <ShieldAlert className="w-3.5 h-3.5 text-blue-600 dark:text-cyan-400" />
-                    Verified MITRE Detection Strategy
+                    Verified MITRE Detection Strategies ({socKnowledgeDetails?.detectionStrategies.length || (mitreTechnique?.detectionGuidance ? 1 : 0)})
                   </h4>
-                  <p className="text-xs text-slate-700 dark:text-slate-300 leading-relaxed">{mitreTechnique.detectionGuidance}</p>
+                  {socKnowledgeDetails?.detectionStrategies.length ? (
+                    <div className="space-y-1.5">
+                      {socKnowledgeDetails.detectionStrategies.map((ds, idx) => (
+                        <div key={idx} className="p-2 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded text-xs flex items-center justify-between">
+                          <span className="text-slate-800 dark:text-slate-200 font-medium">{ds.name}</span>
+                          <span className="font-mono text-[10px] text-blue-600 dark:text-cyan-400 font-semibold">{ds.attackId}</span>
+                        </div>
+                      ))}
+                    </div>
+                  ) : mitreTechnique?.detectionGuidance ? (
+                    <p className="text-xs text-slate-700 dark:text-slate-300 leading-relaxed">{mitreTechnique.detectionGuidance}</p>
+                  ) : (
+                    <p className="text-xs text-slate-500 italic">No detection strategies cataloged for this technique.</p>
+                  )}
                 </div>
+
+                {/* Behavioral Analytics, Log Sources & Data Components */}
+                {socKnowledgeDetails && (socKnowledgeDetails.analytics.length > 0 || socKnowledgeDetails.logSources.length > 0 || socKnowledgeDetails.dataComponents.length > 0) && (
+                  <div className="p-4 bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 rounded-lg space-y-3">
+                    <h4 className="text-xs font-mono uppercase font-bold text-slate-800 dark:text-slate-200 flex items-center gap-1.5">
+                      <FileSearch className="w-3.5 h-3.5 text-emerald-600 dark:text-emerald-400" />
+                      SOC Analyst Reference Telemetry & Analytics
+                    </h4>
+
+                    {socKnowledgeDetails.analytics.length > 0 && (
+                      <div className="space-y-1">
+                        <span className="text-[10px] font-mono text-slate-500 dark:text-slate-400 uppercase block font-semibold">
+                          Behavioral Analytics ({socKnowledgeDetails.analytics.length}):
+                        </span>
+                        <div className="flex flex-wrap gap-1.5">
+                          {socKnowledgeDetails.analytics.map((an, idx) => (
+                            <span
+                              key={idx}
+                              className="px-2 py-0.5 rounded text-[11px] font-mono bg-emerald-50 text-emerald-800 border border-emerald-200 dark:bg-emerald-950 dark:text-emerald-300 dark:border-emerald-800"
+                            >
+                              {an.id}: {an.name}
+                            </span>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+
+                    {socKnowledgeDetails.logSources.length > 0 && (
+                      <div className="space-y-1 pt-1 border-t border-slate-200 dark:border-slate-800">
+                        <span className="text-[10px] font-mono text-slate-500 dark:text-slate-400 uppercase block font-semibold">
+                          Cataloged Log Sources ({socKnowledgeDetails.logSources.length}):
+                        </span>
+                        <div className="flex flex-wrap gap-1">
+                          {socKnowledgeDetails.logSources.map((ls, idx) => (
+                            <span
+                              key={idx}
+                              className="px-2 py-0.5 rounded text-[10px] font-mono bg-slate-200 dark:bg-slate-900 text-slate-800 dark:text-slate-300"
+                            >
+                              {ls}
+                            </span>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+
+                    {socKnowledgeDetails.dataComponents.length > 0 && (
+                      <div className="space-y-1 pt-1 border-t border-slate-200 dark:border-slate-800">
+                        <span className="text-[10px] font-mono text-slate-500 dark:text-slate-400 uppercase block font-semibold">
+                          Data Components:
+                        </span>
+                        <div className="flex flex-wrap gap-1">
+                          {socKnowledgeDetails.dataComponents.map((dc, idx) => (
+                            <span
+                              key={idx}
+                              className="px-1.5 py-0.5 rounded text-[10px] font-mono bg-blue-50 dark:bg-blue-950 text-blue-700 dark:text-cyan-300 border border-blue-200 dark:border-blue-800"
+                            >
+                              {dc.name}
+                            </span>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                )}
 
                 {/* Mitigations */}
                 <div className="p-4 bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 rounded-lg space-y-2">
@@ -436,65 +666,7 @@ export const AlertDetailDrawer: React.FC<AlertDetailDrawerProps> = ({
           </div>
         )}
 
-        {/* TAB 4: NETWORK FLOW (CIC-IDS2017) */}
-        {activeTab === 'network' && (
-          <div className="space-y-4">
-            <div className="flex items-center justify-between">
-              <ProvenanceBadge type="cic_ids_sample" label="CIC-IDS2017 FLOW SCHEMA" />
-              <span className="text-[11px] font-mono text-slate-500 dark:text-slate-400">
-                {networkFlow ? `Flow ID: ${networkFlow.flowId}` : 'No flow correlated'}
-              </span>
-            </div>
-
-            {networkFlow ? (
-              <div className="bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 rounded-lg p-4 font-mono text-xs space-y-3">
-                <div className="grid grid-cols-2 gap-3 text-[11px]">
-                  <div>
-                    <span className="text-slate-500 uppercase text-[10px] block">SOURCE SOCKET</span>
-                    <span className="text-blue-600 dark:text-cyan-400 font-bold">{networkFlow.sourceIp}:{networkFlow.sourcePort}</span>
-                  </div>
-                  <div>
-                    <span className="text-slate-500 uppercase text-[10px] block">DESTINATION SOCKET</span>
-                    <span className="text-amber-600 dark:text-amber-400 font-bold">{networkFlow.destinationIp}:{networkFlow.destinationPort}</span>
-                  </div>
-                  <div>
-                    <span className="text-slate-500 uppercase text-[10px] block">PROTOCOL / DURATION</span>
-                    <span className="text-slate-800 dark:text-slate-200">{networkFlow.protocol} ({networkFlow.flowDurationMs} ms)</span>
-                  </div>
-                  <div>
-                    <span className="text-slate-500 uppercase text-[10px] block">FLOW LABEL / CLASSIFICATION</span>
-                    <span className={`font-bold ${networkFlow.label === 'BENIGN' ? 'text-emerald-600 dark:text-emerald-400' : 'text-rose-600 dark:text-rose-400'}`}>
-                      {networkFlow.label}
-                    </span>
-                  </div>
-                </div>
-
-                <div className="pt-2 border-t border-slate-200 dark:border-slate-800 grid grid-cols-3 gap-2 text-[10px]">
-                  <div className="p-2 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded">
-                    <span className="text-slate-500 block">TOTAL PACKETS</span>
-                    <span className="text-slate-800 dark:text-slate-200 font-bold">{networkFlow.totalFwdPackets + networkFlow.totalBwdPackets}</span>
-                  </div>
-                  <div className="p-2 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded">
-                    <span className="text-slate-500 block">FLOW BYTES/SEC</span>
-                    <span className="text-slate-800 dark:text-slate-200 font-bold">{networkFlow.flowBytesPerSec.toLocaleString()} B/s</span>
-                  </div>
-                  <div className="p-2 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded">
-                    <span className="text-slate-500 block">TCP FLAGS (SYN/RST/ACK)</span>
-                    <span className="text-slate-800 dark:text-slate-200 font-bold">
-                      {networkFlow.synFlagCount} / {networkFlow.rstFlagCount} / {networkFlow.ackFlagCount}
-                    </span>
-                  </div>
-                </div>
-              </div>
-            ) : (
-              <p className="text-xs text-slate-500 dark:text-slate-400 italic p-4 bg-slate-50 dark:bg-slate-950 rounded border border-slate-200 dark:border-slate-800">
-                No correlated CIC-IDS2017 network flow record linked to this alert.
-              </p>
-            )}
-          </div>
-        )}
-
-        {/* TAB 5: ANALYST INVESTIGATION NOTES */}
+        {/* TAB 4: ANALYST INVESTIGATION NOTES */}
         {activeTab === 'notes' && (
           <div className="space-y-4">
             {/* Status change bar */}
@@ -509,6 +681,18 @@ export const AlertDetailDrawer: React.FC<AlertDetailDrawerProps> = ({
                   </span>
                 )}
               </div>
+
+              {/* Incident Closure Guard Alert */}
+              {closureBlockedMessage && (
+                <div className="p-3 bg-rose-50 dark:bg-rose-950/80 border border-rose-300 dark:border-rose-800 rounded-lg text-xs text-rose-800 dark:text-rose-200 space-y-1">
+                  <div className="flex items-center gap-2 font-semibold text-rose-700 dark:text-rose-300 font-mono text-[11px]">
+                    <AlertTriangle className="w-4 h-4 shrink-0" />
+                    <span>INCIDENT CLOSURE GUARD: RESOLUTION BLOCKED</span>
+                  </div>
+                  <p className="leading-relaxed pl-6">{closureBlockedMessage}</p>
+                </div>
+              )}
+
               <div className="flex flex-wrap gap-2">
                 {(['new', 'in_triage', 'escalated', 'resolved', 'false_positive'] as AlertStatus[]).map((st) => (
                   <button
@@ -530,9 +714,13 @@ export const AlertDetailDrawer: React.FC<AlertDetailDrawerProps> = ({
             {/* Existing notes */}
             <div className="space-y-2">
               <span className="text-xs font-mono uppercase font-bold text-slate-800 dark:text-slate-300 block">
-                Analyst Findings Journal ({alert.analystNotes.length})
+                Analyst Findings Journal
               </span>
-              {alert.analystNotes.length === 0 ? (
+              {currentRole !== 'soc_analyst' ? (
+                <p className="text-xs text-slate-500 italic p-3 bg-slate-50 dark:bg-slate-950 rounded border border-slate-200 dark:border-slate-800">
+                  Private analyst investigation notes and findings are restricted to SOC Analysts under strict role isolation.
+                </p>
+              ) : alert.analystNotes.length === 0 ? (
                 <p className="text-xs text-slate-500 italic p-3 bg-slate-50 dark:bg-slate-950 rounded border border-slate-200 dark:border-slate-800">
                   No analyst notes recorded yet.
                 </p>
@@ -575,6 +763,252 @@ export const AlertDetailDrawer: React.FC<AlertDetailDrawerProps> = ({
             )}
           </div>
         )}
+
+        {/* TAB 5: INCIDENT RESPONSE TASKS */}
+        {activeTab === 'tasks' && (
+          <div className="space-y-4">
+            <div className="p-3 bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 rounded-lg flex items-center justify-between gap-3">
+              <div>
+                <h4 className="text-xs font-mono uppercase font-bold text-slate-800 dark:text-slate-200 flex items-center gap-1.5">
+                  <ClipboardList className="w-3.5 h-3.5 text-amber-500" />
+                  Assigned IT Operations Remediation Tasks ({linkedTasks.length})
+                </h4>
+                <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-0.5">
+                  Tasks dispatched to IT Operations for containment, isolation, or recovery.
+                </p>
+              </div>
+              {currentRole === 'soc_analyst' && onCreateTask && (
+                <Button
+                  size="xs"
+                  variant="primary"
+                  onClick={() => setIsCreateTaskModalOpen(true)}
+                  className="flex items-center gap-1.5 shrink-0"
+                >
+                  <ClipboardList className="w-3.5 h-3.5" />
+                  Create Response Task
+                </Button>
+              )}
+            </div>
+
+            {linkedTasks.length === 0 ? (
+              <div className="text-center py-12 px-4 border border-dashed border-slate-200 dark:border-slate-800 rounded-lg bg-slate-50/50 dark:bg-slate-950/40 space-y-3">
+                <ClipboardList className="w-8 h-8 text-slate-400 mx-auto" />
+                <div className="text-xs font-semibold text-slate-700 dark:text-slate-300">
+                  No Response Tasks Created Yet
+                </div>
+                <p className="text-[11px] text-slate-500 max-w-sm mx-auto">
+                  SOC Analysts can dispatch actionable remediation and containment tasks directly to IT Operations.
+                </p>
+                {currentRole === 'soc_analyst' && onCreateTask && (
+                  <Button
+                    size="xs"
+                    variant="outline"
+                    onClick={() => setIsCreateTaskModalOpen(true)}
+                    className="text-amber-700 dark:text-amber-300 border-amber-300 dark:border-amber-700/80"
+                  >
+                    Create First Task
+                  </Button>
+                )}
+              </div>
+            ) : (
+              <div className="space-y-3">
+                {linkedTasks.map((t) => {
+                  const reviewState = getTaskReviewState(t);
+                  const history = reviewState.history;
+
+                  return (
+                    <div
+                      key={t.id}
+                      className="p-3.5 bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 rounded-lg text-xs space-y-3"
+                    >
+                      <div className="flex items-center justify-between">
+                        <div className="flex items-center gap-2">
+                          <span className="font-mono font-bold text-amber-700 dark:text-amber-400 text-xs">
+                            {t.id}
+                          </span>
+                          <span
+                            className={`text-[9px] font-mono uppercase px-2 py-0.5 rounded font-bold border ${reviewState.badgeClass}`}
+                          >
+                            {reviewState.label}
+                          </span>
+                          <span className="text-[9px] font-mono uppercase px-1.5 py-0.2 rounded font-bold bg-amber-100 dark:bg-amber-950 text-amber-800 dark:text-amber-300 border border-amber-200 dark:border-amber-800">
+                            {t.priority} priority
+                          </span>
+                        </div>
+                        <span className="text-[10px] font-mono text-slate-500">
+                          {new Date(t.createdAt).toUTCString()}
+                        </span>
+                      </div>
+
+                      <div>
+                        <div className="font-semibold text-slate-900 dark:text-slate-100 text-xs font-heading">
+                          {t.title}
+                        </div>
+                        <p className="text-[11px] text-slate-600 dark:text-slate-300 whitespace-pre-wrap leading-relaxed mt-1">
+                          {t.description}
+                        </p>
+                      </div>
+
+                      <div className="p-2 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800/80 rounded font-mono text-[10px] text-slate-600 dark:text-slate-400 flex flex-wrap items-center justify-between gap-2">
+                        <span>Target Asset: <strong className="text-slate-900 dark:text-slate-200">{t.targetAsset}</strong></span>
+                        <span>Assigned: <strong className="text-amber-600 dark:text-amber-400 uppercase">{t.assignedRole}</strong></span>
+                      </div>
+
+                      {/* Completed Remediation Package Inspection */}
+                      {(t.status === 'completed' || history.hasVerificationReport) && (
+                        <div className="p-3 bg-emerald-50/50 dark:bg-emerald-950/20 border border-emerald-200 dark:border-emerald-900/60 rounded-lg space-y-2.5">
+                          <div className="flex flex-wrap items-center justify-between gap-1 font-mono text-[11px]">
+                            <span className="font-bold text-emerald-800 dark:text-emerald-300 flex items-center gap-1.5 uppercase">
+                              <ShieldAlert className="w-3.5 h-3.5 text-emerald-600 dark:text-emerald-400" />
+                              IT Operations Remediation Package
+                            </span>
+                            <div className="flex items-center gap-2">
+                              {history.verificationType === 'simulation' ? (
+                                <span className="text-[9px] font-mono px-2 py-0.5 rounded bg-purple-100 text-purple-800 dark:bg-purple-950 dark:text-purple-300 border border-purple-200 dark:border-purple-800 font-bold uppercase">
+                                  Simulation Verified (No Live Changes)
+                                </span>
+                              ) : history.verificationType === 'real' ? (
+                                <span className="text-[9px] font-mono px-2 py-0.5 rounded bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-800 font-bold uppercase">
+                                  Real Endpoint Remediation
+                                </span>
+                              ) : null}
+                              <span className="text-slate-500 text-[10px]">
+                                {t.completedAt ? new Date(t.completedAt).toUTCString() : 'Completed'}
+                              </span>
+                            </div>
+                          </div>
+
+                          {/* Operator Identity */}
+                          <div className="text-[11px] font-mono text-slate-600 dark:text-slate-400 flex items-center gap-2">
+                            <span>Certified Operator:</span>
+                            <strong className="text-slate-800 dark:text-slate-200">{t.completedBy || 'IT Operations'}</strong>
+                          </div>
+
+                          {/* Work Performed */}
+                          {history.workPerformed && (
+                            <div className="space-y-1">
+                              <span className="text-[10px] font-mono text-slate-500 uppercase block">Work Performed:</span>
+                              <div className="p-2 bg-white dark:bg-slate-900 rounded border border-slate-200 dark:border-slate-800 text-[11px] font-mono text-slate-800 dark:text-slate-200 whitespace-pre-wrap">
+                                {history.workPerformed}
+                              </div>
+                            </div>
+                          )}
+
+                          {/* Verification Checklist */}
+                          {history.checklistItems.length > 0 && (
+                            <div className="space-y-1">
+                              <span className="text-[10px] font-mono text-slate-500 uppercase block">
+                                Verified Checklist ({history.checklistItems.filter((i) => i.verified).length}/{history.checklistItems.length}):
+                              </span>
+                              <div className="space-y-1 pl-1">
+                                {history.checklistItems.map((item, idx) => (
+                                  <div key={idx} className="flex items-center gap-1.5 font-mono text-[11px] text-slate-700 dark:text-slate-300">
+                                    <CheckSquare className="w-3 h-3 text-emerald-600 dark:text-emerald-400 shrink-0" />
+                                    <span>{item.label}</span>
+                                  </div>
+                                ))}
+                              </div>
+                            </div>
+                          )}
+
+                          {/* Evidence Reference */}
+                          {history.evidenceReference && (
+                            <div className="space-y-1">
+                              <span className="text-[10px] font-mono text-slate-500 uppercase block">Evidence / Artifact Reference:</span>
+                              <div className="p-2 bg-blue-50/60 dark:bg-cyan-950/30 rounded border border-blue-200/60 dark:border-cyan-900/40 text-[11px] font-mono text-blue-700 dark:text-cyan-300 flex items-center gap-1.5">
+                                <ExternalLink className="w-3.5 h-3.5 shrink-0" />
+                                <span className="break-all">{history.evidenceReference}</span>
+                              </div>
+                            </div>
+                          )}
+
+                          {/* Attestation */}
+                          {history.operatorAttestation && (
+                            <div className="pt-1.5 border-t border-emerald-200/60 dark:border-emerald-900/40 text-[10px] font-mono text-slate-500 dark:text-slate-400 italic">
+                              Attestation: {history.operatorAttestation}
+                            </div>
+                          )}
+                        </div>
+                      )}
+
+                      {/* Review & Rework History Trail */}
+                      {history.reviews.length > 0 && (
+                        <div className="space-y-2 pt-1 border-t border-slate-200 dark:border-slate-800">
+                          <span className="text-[10px] font-mono uppercase font-bold text-slate-500 flex items-center gap-1">
+                            <History className="w-3 h-3" />
+                            SOC Analyst Review History ({history.reviews.length})
+                          </span>
+                          <div className="space-y-1.5">
+                            {history.reviews.map((rev, idx) => (
+                              <div
+                                key={idx}
+                                className={`p-2.5 rounded border text-[11px] space-y-1 ${
+                                  rev.decision === 'approved'
+                                    ? 'bg-emerald-50 dark:bg-emerald-950/40 border-emerald-200 dark:border-emerald-800 text-emerald-900 dark:text-emerald-200'
+                                    : 'bg-orange-50 dark:bg-orange-950/40 border-orange-200 dark:border-orange-800 text-orange-900 dark:text-orange-200'
+                                }`}
+                              >
+                                <div className="flex items-center justify-between font-mono text-[10px]">
+                                  <span className="font-bold uppercase">
+                                    {rev.decision === 'approved' ? '✓ Remediation Approved' : '↺ Rework Requested'}
+                                  </span>
+                                  <span>{new Date(rev.timestamp).toUTCString()}</span>
+                                </div>
+                                <div className="text-[11px]">
+                                  Reviewed by: <strong>{rev.reviewerName}</strong>
+                                </div>
+                                <p className="font-mono bg-white dark:bg-slate-950 p-2 rounded border border-slate-200 dark:border-slate-800/80 whitespace-pre-wrap">
+                                  {rev.notesOrInstructions}
+                                </p>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+
+                      {/* Analyst Decision Actions */}
+                      {currentRole === 'soc_analyst' && onReviewTask && reviewState.canApprove && (
+                        <div className="pt-2 border-t border-slate-200 dark:border-slate-800 flex items-center justify-between gap-2">
+                          <span className="text-[11px] font-mono text-purple-700 dark:text-purple-300 font-semibold">
+                            Review Decision Required:
+                          </span>
+                          <div className="flex items-center gap-2">
+                            <Button
+                              size="xs"
+                              variant="outline"
+                              onClick={() => setSelectedTaskForRework(t)}
+                              className="text-orange-700 dark:text-orange-300 border-orange-300 dark:border-orange-800 hover:bg-orange-50 dark:hover:bg-orange-950/40 font-mono text-[11px]"
+                            >
+                              <RefreshCw className="w-3 h-3 mr-1" />
+                              Request Rework
+                            </Button>
+                            <Button
+                              size="xs"
+                              variant="primary"
+                              onClick={() => setSelectedTaskForApproval(t)}
+                              className="bg-emerald-600 hover:bg-emerald-700 text-white font-mono text-[11px]"
+                            >
+                              <CheckCircle2 className="w-3 h-3 mr-1" />
+                              Approve Remediation
+                            </Button>
+                          </div>
+                        </div>
+                      )}
+
+                      {/* Display final approval confirmation badge if already approved */}
+                      {reviewState.status === 'approved' && (
+                        <div className="p-2 bg-emerald-50 dark:bg-emerald-950/30 border border-emerald-200 dark:border-emerald-800/80 rounded font-mono text-[11px] text-emerald-800 dark:text-emerald-300 flex items-center gap-1.5">
+                          <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
+                          <span>Remediation formally verified & approved by {reviewState.latestReview?.reviewerName || 'SOC Analyst'}. Task closed.</span>
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        )}
       </div>
 
       {/* Drawer Bottom Bar */}
@@ -586,6 +1020,45 @@ export const AlertDetailDrawer: React.FC<AlertDetailDrawerProps> = ({
           Close Drawer
         </Button>
       </div>
+
+      {/* Create Task Modal */}
+      {onCreateTask && (
+        <CreateTaskModal
+          isOpen={isCreateTaskModalOpen}
+          onClose={() => setIsCreateTaskModalOpen(false)}
+          alert={alert}
+          currentUser={currentUser || { id: 'usr-analyst-01', name: 'Analyst', email: '', role: currentRole, callsign: 'ANALYST', title: 'SOC Analyst' }}
+          onCreateTask={onCreateTask}
+        />
+      )}
+
+      {/* Request Rework Modal */}
+      {selectedTaskForRework && onReviewTask && (
+        <RequestReworkModal
+          isOpen={Boolean(selectedTaskForRework)}
+          onClose={() => setSelectedTaskForRework(null)}
+          task={selectedTaskForRework}
+          currentUser={currentUser || { id: 'usr-analyst-01', name: 'Analyst', email: '', role: currentRole, callsign: 'ANALYST', title: 'SOC Analyst' }}
+          onSubmitRework={async (taskId, instructions) => {
+            await onReviewTask(taskId, 'rework_requested', instructions);
+            setSelectedTaskForRework(null);
+          }}
+        />
+      )}
+
+      {/* Approve Remediation Modal */}
+      {selectedTaskForApproval && onReviewTask && (
+        <ApproveRemediationModal
+          isOpen={Boolean(selectedTaskForApproval)}
+          onClose={() => setSelectedTaskForApproval(null)}
+          task={selectedTaskForApproval}
+          currentUser={currentUser || { id: 'usr-analyst-01', name: 'Analyst', email: '', role: currentRole, callsign: 'ANALYST', title: 'SOC Analyst' }}
+          onConfirmApproval={async (taskId, notes) => {
+            await onReviewTask(taskId, 'approved', notes || '');
+            setSelectedTaskForApproval(null);
+          }}
+        />
+      )}
     </div>
   );
 };

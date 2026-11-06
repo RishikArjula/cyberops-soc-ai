@@ -10,13 +10,16 @@
 import { IAlertRepository } from './IAlertRepository';
 import { IAuditLogRepository } from './IAuditLogRepository';
 import { IMITRERepository } from './IMITRERepository';
+import { IDetectionRecommendationRepository } from './IDetectionRecommendationRepository';
 
 import { LocalAlertRepository } from './local/LocalAlertRepository';
 import { LocalAuditLogRepository } from './local/LocalAuditLogRepository';
 import { LocalMITRERepository } from './local/LocalMITRERepository';
+import { LocalDetectionRecommendationRepository } from './local/LocalDetectionRecommendationRepository';
 
 import { SupabaseAlertRepository } from './supabase/SupabaseAlertRepository';
 import { SupabaseAuditLogRepository } from './supabase/SupabaseAuditLogRepository';
+import { SupabaseDetectionRecommendationRepository } from './supabase/SupabaseDetectionRecommendationRepository';
 
 import {
   getSupabaseConfigurationStatus,
@@ -27,16 +30,20 @@ import {
 export * from './IAlertRepository';
 export * from './IAuditLogRepository';
 export * from './IMITRERepository';
+export * from './IDetectionRecommendationRepository';
 export * from './local/LocalAlertRepository';
 export * from './local/LocalAuditLogRepository';
 export * from './local/LocalMITRERepository';
+export * from './local/LocalDetectionRecommendationRepository';
 export * from './supabase/SupabaseAlertRepository';
 export * from './supabase/SupabaseAuditLogRepository';
+export * from './supabase/SupabaseDetectionRecommendationRepository';
 
 export interface RepositoryBundle {
   alertRepo: IAlertRepository;
   auditRepo: IAuditLogRepository;
   mitreRepo: IMITRERepository;
+  recommendationRepo: IDetectionRecommendationRepository;
   isLive: boolean;
   mode: SupabaseRuntimeMode;
 }
@@ -60,6 +67,7 @@ export function getRepositories(forceRefresh = false): RepositoryBundle {
       alertRepo: new SupabaseAlertRepository(),
       auditRepo: new SupabaseAuditLogRepository(),
       mitreRepo: new LocalMITRERepository(), // Authentic static MITRE ATT&CK taxonomy
+      recommendationRepo: new SupabaseDetectionRecommendationRepository(),
       isLive: true,
       mode: 'live_supabase',
     };
@@ -73,10 +81,12 @@ export function getRepositories(forceRefresh = false): RepositoryBundle {
   }
 
   // Development/demo fallback
+  const auditRepo = new LocalAuditLogRepository();
   activeBundle = {
     alertRepo: new LocalAlertRepository(),
-    auditRepo: new LocalAuditLogRepository(),
+    auditRepo,
     mitreRepo: new LocalMITRERepository(),
+    recommendationRepo: new LocalDetectionRecommendationRepository(auditRepo),
     isLive: false,
     mode: 'development_demo',
   };

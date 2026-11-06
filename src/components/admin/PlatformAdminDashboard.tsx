@@ -22,6 +22,7 @@ import {
   RefreshCw,
 } from 'lucide-react';
 import { UserProfile, UserRole, ROLE_METADATA } from '../../types/auth';
+import { AuditLogEntry } from '../../types/audit';
 import { Modal } from '../common/Modal';
 import {
   validateRoleChange,
@@ -123,11 +124,17 @@ export const PlatformAdminDashboard: React.FC<PlatformAdminDashboardProps> = ({ 
 
   // User Governance State
   const [profiles, setProfiles] = useState<UserProfile[]>([]);
+  const [profilesError, setProfilesError] = useState<string | null>(null);
   const [selectedRoles, setSelectedRoles] = useState<Record<string, UserRole>>({});
   const [isLoadingUsers, setIsLoadingUsers] = useState(false);
   const [actionLoading, setActionLoading] = useState<Record<string, boolean>>({});
   const [statusFilter, setStatusFilter] = useState<'pending' | 'approved' | 'disabled' | 'all'>('pending');
   const [feedback, setFeedback] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
+
+  // Platform Audit Logs State (audit_category = 'platform')
+  const [auditLogs, setAuditLogs] = useState<AuditLogEntry[]>([]);
+  const [isLoadingAuditLogs, setIsLoadingAuditLogs] = useState(false);
+  const [auditLogsError, setAuditLogsError] = useState<string | null>(null);
 
   // Governance Modal State for Suspend, Reactivate, Deactivate, and Role Change
   const [governanceModal, setGovernanceModal] = useState<{
@@ -175,7 +182,7 @@ export const PlatformAdminDashboard: React.FC<PlatformAdminDashboardProps> = ({ 
     modelConfigured: false,
   });
 
-  // Load user profiles
+  // Load user profiles without silent fallback when Supabase is configured
   const fetchProfiles = async () => {
     setIsLoadingUsers(true);
     if (isSupabaseConfigured() && supabase) {
@@ -185,7 +192,14 @@ export const PlatformAdminDashboard: React.FC<PlatformAdminDashboardProps> = ({ 
           .select('*')
           .order('created_at', { ascending: false });
 
-        if (!error && data) {
+        if (error) {
+          setProfilesError(`Supabase query failed: ${error.message} (${error.code || 'UNKNOWN'})`);
+          setProfiles([]);
+          setIsLoadingUsers(false);
+          return;
+        }
+
+        if (data) {
           const mapped: UserProfile[] = data.map((r: any) => ({
             id: r.id,
             name: r.name,
@@ -200,15 +214,36 @@ export const PlatformAdminDashboard: React.FC<PlatformAdminDashboardProps> = ({ 
             createdAt: r.created_at,
           }));
           setProfiles(mapped);
+          setProfilesError(null);
           setIsLoadingUsers(false);
           return;
         }
-      } catch {
-        // Fallback to dev profiles if query fails
+      } catch (err: any) {
+        setProfilesError(`Network or database exception fetching profiles: ${err?.message || 'Unknown error'}`);
+        setProfiles([]);
+        setIsLoadingUsers(false);
+        return;
       }
     }
+    // Only use initial dev profiles if Supabase is completely unconfigured (pure local mode)
     setProfiles(INITIAL_DEV_PROFILES);
+    setProfilesError(null);
     setIsLoadingUsers(false);
+  };
+
+  // Fetch platform governance audit logs
+  const fetchAdminAuditLogs = async () => {
+    setIsLoadingAuditLogs(true);
+    setAuditLogsError(null);
+    try {
+      const logs = await auditRepo.getLogsForUser(currentUser);
+      setAuditLogs(logs || []);
+    } catch (err: any) {
+      setAuditLogsError(err?.message || 'Failed to retrieve platform governance audit logs.');
+      setAuditLogs([]);
+    } finally {
+      setIsLoadingAuditLogs(false);
+    }
   };
 
   const fetchBootstrapInfo = async () => {
@@ -275,6 +310,7 @@ export const PlatformAdminDashboard: React.FC<PlatformAdminDashboardProps> = ({ 
     fetchBootstrapInfo();
     probeDatabase();
     probeCopilot();
+    fetchAdminAuditLogs();
   }, []);
 
   // Compute Admin Overview metrics and Data Source Inventory
@@ -387,6 +423,7 @@ export const PlatformAdminDashboard: React.FC<PlatformAdminDashboardProps> = ({ 
           type: 'success',
           message: `Account for ${targetUser.name} (${targetUser.email}) approved successfully as ${ROLE_METADATA[assignedRole].label}.`,
         });
+        fetchAdminAuditLogs();
       } else {
         setFeedback({
           type: 'error',
@@ -682,6 +719,7 @@ export const PlatformAdminDashboard: React.FC<PlatformAdminDashboardProps> = ({ 
 
       if (auditConfirmed) {
         setFeedback({ type: 'success', message: successMsg });
+        fetchAdminAuditLogs();
       } else {
         setFeedback({
           type: 'error',
@@ -818,6 +856,35 @@ export const PlatformAdminDashboard: React.FC<PlatformAdminDashboardProps> = ({ 
         </div>
       </div>
 
+      {/* User Profiles Query Failure Banner (Zero Silent Fallback) */}
+      {profilesError && (
+        <div className="p-4 rounded-xl bg-rose-50 dark:bg-rose-950/40 border border-rose-300 dark:border-rose-800 text-rose-800 dark:text-rose-200 flex flex-col sm:flex-row sm:items-center justify-between gap-3 shadow-xs">
+          <div className="flex items-start sm:items-center gap-3">
+            <AlertTriangle className="w-5 h-5 text-rose-600 shrink-0 mt-0.5 sm:mt-0" />
+            <div>
+              <div className="font-bold text-xs uppercase font-mono tracking-wider">
+                Database Query Error &bull; User Profiles Unavailable
+              </div>
+              <div className="text-xs text-rose-700 dark:text-rose-300 font-mono mt-0.5">
+                {profilesError}
+              </div>
+              <div className="text-[11px] text-rose-600 dark:text-rose-400 mt-1 font-sans">
+                Silent fallback to development mock profiles is disabled to maintain data provenance integrity.
+              </div>
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={fetchProfiles}
+            disabled={isLoadingUsers}
+            className="px-3 py-1.5 text-xs font-mono font-bold bg-rose-600 hover:bg-rose-700 text-white rounded-lg flex items-center gap-1.5 transition self-start sm:self-auto shrink-0"
+          >
+            <RefreshCw className={`w-3.5 h-3.5 ${isLoadingUsers ? 'animate-spin' : ''}`} />
+            Retry Query
+          </button>
+        </div>
+      )}
+
       {/* ========================================================================= */}
       {/* SECTION 1: ADMIN OVERVIEW & PLATFORM HEALTH METRICS */}
       {/* ========================================================================= */}
@@ -826,6 +893,10 @@ export const PlatformAdminDashboard: React.FC<PlatformAdminDashboardProps> = ({ 
         dbStatus={dbStatus}
         isCheckingDb={isCheckingDb}
         onRefreshDb={probeDatabase}
+        auditLogs={auditLogs}
+        isLoadingAuditLogs={isLoadingAuditLogs}
+        auditLogsError={auditLogsError}
+        onRefreshAuditLogs={fetchAdminAuditLogs}
       />
 
       {/* ========================================================================= */}

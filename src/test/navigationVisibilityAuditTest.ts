@@ -50,12 +50,20 @@ function runTest(name: string, fn: () => void | Promise<void>): Promise<void> | 
 // Emulate AppSidebar visibleNavItems logic for headless test verification
 type WorkspaceView =
   | 'overview'
+  | 'strategies'
+  | 'analytics'
+  | 'log_sources'
+  | 'data_components'
+  | 'mitre_explorer'
+  | 'itops_overview'
+  | 'itops_techniques'
+  | 'itops_mitigations'
+  | 'seceng_overview'
   | 'alerts'
   | 'investigations'
   | 'playbooks'
   | 'mitre'
   | 'tasks'
-  | 'network'
   | 'audit'
   | 'profile'
   | 'admin';
@@ -67,34 +75,94 @@ const ALL_SIDEBAR_NAV_ITEMS: Array<{
   primaryRole?: UserRole;
 }> = [
   {
+    id: 'seceng_overview',
+    label: () => 'Overview',
+    authorizedRoles: ['security_engineer'],
+    primaryRole: 'security_engineer',
+  },
+  {
     id: 'admin',
     label: () => 'Platform Administration',
     authorizedRoles: ['super_admin'],
     primaryRole: 'super_admin',
   },
+  // SOC Analyst Six Independent Knowledge Modules
   {
     id: 'overview',
-    label: () => 'SOC Overview',
+    label: () => 'SOC Analytics Overview',
     authorizedRoles: ['soc_analyst'],
     primaryRole: 'soc_analyst',
+  },
+  {
+    id: 'strategies',
+    label: () => 'Detection Strategy Analytics',
+    authorizedRoles: ['soc_analyst'],
+    primaryRole: 'soc_analyst',
+  },
+  {
+    id: 'analytics',
+    label: () => 'Analytic Analytics',
+    authorizedRoles: ['soc_analyst'],
+    primaryRole: 'soc_analyst',
+  },
+  {
+    id: 'log_sources',
+    label: () => 'Log Source Analytics',
+    authorizedRoles: ['soc_analyst'],
+    primaryRole: 'soc_analyst',
+  },
+  {
+    id: 'data_components',
+    label: () => 'Data Component Analytics',
+    authorizedRoles: ['soc_analyst'],
+    primaryRole: 'soc_analyst',
+  },
+  {
+    id: 'mitre_explorer',
+    label: () => 'MITRE ATT&CK Explorer',
+    authorizedRoles: ['soc_analyst'],
+    primaryRole: 'soc_analyst',
+  },
+  // IT Operations Three Dedicated Knowledge Modules
+  {
+    id: 'itops_overview',
+    label: () => 'IT Operations Overview',
+    authorizedRoles: ['it_operations'],
+    primaryRole: 'it_operations',
+  },
+  {
+    id: 'itops_techniques',
+    label: () => 'Technique & Platform Explorer',
+    authorizedRoles: ['it_operations'],
+    primaryRole: 'it_operations',
+  },
+  {
+    id: 'itops_mitigations',
+    label: () => 'Mitigation Explorer',
+    authorizedRoles: ['it_operations'],
+    primaryRole: 'it_operations',
+  },
+  // Operational Roles Navigation Modules
+  {
+    id: 'tasks',
+    label: () => 'Incident Response Tasks',
+    authorizedRoles: ['it_operations'],
+    primaryRole: 'it_operations',
   },
   {
     id: 'alerts',
     label: (role) => (role === 'it_operations' ? 'Scoped Incident Alerts' : 'Alert Triage Queue'),
-    authorizedRoles: ['soc_analyst', 'security_engineer', 'it_operations'],
-    primaryRole: 'soc_analyst',
+    authorizedRoles: ['security_engineer', 'it_operations'],
   },
   {
     id: 'investigations',
     label: () => 'Deep Investigation',
-    authorizedRoles: ['soc_analyst'],
-    primaryRole: 'soc_analyst',
+    authorizedRoles: [],
   },
   {
     id: 'playbooks',
     label: () => 'Response Playbooks',
-    authorizedRoles: ['soc_analyst'],
-    primaryRole: 'soc_analyst',
+    authorizedRoles: [],
   },
   {
     id: 'mitre',
@@ -103,20 +171,9 @@ const ALL_SIDEBAR_NAV_ITEMS: Array<{
     primaryRole: 'security_engineer',
   },
   {
-    id: 'tasks',
-    label: () => 'Incident Response Tasks',
-    authorizedRoles: ['it_operations'],
-    primaryRole: 'it_operations',
-  },
-  {
-    id: 'network',
-    label: () => 'Network Flow Telemetry',
-    authorizedRoles: ['soc_analyst', 'security_engineer', 'it_operations'],
-  },
-  {
     id: 'audit',
     label: () => 'Containment Audit Trail',
-    authorizedRoles: ['soc_analyst', 'security_engineer', 'it_operations', 'super_admin'],
+    authorizedRoles: ['security_engineer', 'it_operations', 'super_admin'],
   },
 ];
 
@@ -134,16 +191,20 @@ async function main() {
 
   console.log('-- Group 1: Role Sidebar Navigation Visibility & Symmetry --');
 
-  runTest('Test 1: SOC Analyst has exactly 6 authorized sidebar modules (profile is in top-right menu only)', () => {
+  runTest('Test 1: SOC Analyst has exactly 6 authorized knowledge modules (profile is in top-right menu only)', () => {
     const items = getVisibleSidebarItems(analyst.role);
     assert(items.length === 6, `Expected 6 modules, got ${items.length}`);
     const ids = items.map((i) => i.id);
     assert(ids.includes('overview'), 'Must have overview');
-    assert(ids.includes('alerts'), 'Must have alerts');
-    assert(ids.includes('investigations'), 'Must have investigations');
-    assert(ids.includes('playbooks'), 'Must have playbooks');
-    assert(ids.includes('network'), 'Must have network');
-    assert(ids.includes('audit'), 'Must have audit');
+    assert(ids.includes('strategies'), 'Must have strategies');
+    assert(ids.includes('analytics'), 'Must have analytics');
+    assert(ids.includes('log_sources'), 'Must have log_sources');
+    assert(ids.includes('data_components'), 'Must have data_components');
+    assert(ids.includes('mitre_explorer'), 'Must have mitre_explorer');
+    assert(!ids.includes('alerts'), 'Must NOT have operational alerts in sidebar');
+    assert(!ids.includes('investigations'), 'Must NOT have investigations in sidebar');
+    assert(!ids.includes('playbooks'), 'Must NOT have playbooks in sidebar');
+    assert(!ids.includes('audit'), 'Must NOT have audit in sidebar');
     assert(!ids.includes('mitre'), 'Must NOT have mitre in sidebar');
     assert(!ids.includes('tasks'), 'Must NOT have tasks in sidebar');
     assert(!ids.includes('profile'), 'Must NOT have profile in sidebar');
@@ -154,9 +215,9 @@ async function main() {
     const items = getVisibleSidebarItems(engineer.role);
     assert(items.length === 4, `Expected 4 modules, got ${items.length}`);
     const ids = items.map((i) => i.id);
+    assert(ids.includes('seceng_overview'), 'Must have seceng_overview');
     assert(ids.includes('mitre'), 'Must have mitre');
     assert(ids.includes('alerts'), 'Must have alerts (read-only)');
-    assert(ids.includes('network'), 'Must have network');
     assert(ids.includes('audit'), 'Must have audit');
     assert(!ids.includes('profile'), 'Must NOT have profile in sidebar');
     assert(!ids.includes('tasks'), 'Must NOT have tasks');
@@ -165,13 +226,15 @@ async function main() {
     assert(!ids.includes('playbooks'), 'Must NOT have playbooks');
   });
 
-  runTest('Test 3: IT Operations has exactly 4 authorized sidebar modules (Scoped Alerts, Tasks, Network Flow, Audit)', () => {
+  runTest('Test 3: IT Operations has exactly 6 authorized sidebar modules (Overview, Technique/Platform Explorer, Mitigation Explorer, Tasks, Scoped Alerts, Audit)', () => {
     const items = getVisibleSidebarItems(itOps.role);
-    assert(items.length === 4, `Expected 4 modules, got ${items.length}`);
+    assert(items.length === 6, `Expected 6 modules, got ${items.length}`);
     const ids = items.map((i) => i.id);
-    assert(ids.includes('alerts'), 'Must have alerts');
+    assert(ids.includes('itops_overview'), 'Must have itops_overview');
+    assert(ids.includes('itops_techniques'), 'Must have itops_techniques');
+    assert(ids.includes('itops_mitigations'), 'Must have itops_mitigations');
     assert(ids.includes('tasks'), 'Must have tasks');
-    assert(ids.includes('network'), 'Must have network');
+    assert(ids.includes('alerts'), 'Must have alerts');
     assert(ids.includes('audit'), 'Must have audit');
     assert(!ids.includes('profile'), 'Must NOT have profile in sidebar');
 
@@ -205,7 +268,7 @@ async function main() {
     assert(!ids.includes('investigations'), 'Must NOT have investigations');
     assert(!ids.includes('playbooks'), 'Must NOT have playbooks');
     assert(!ids.includes('mitre'), 'Must NOT have mitre');
-    assert(!ids.includes('network'), 'Must NOT have network');
+    assert(!ids.includes('network' as any), 'Must NOT have network');
   });
 
   runTest('Test 5: Operator Profile is strictly absent from every role sidebar', () => {
@@ -238,19 +301,19 @@ async function main() {
 
   console.log('\n-- Group 2: Direct URL Hash Routing & Authorization Fallbacks --');
 
-  runTest('Test 6: IT Operations direct hash access to unauthorized views falls back to default view "tasks"', () => {
+  runTest('Test 6: IT Operations direct hash access to unauthorized views falls back to default view "itops_overview"', () => {
     const unauthorizedViews: WorkspaceView[] = ['admin', 'mitre', 'investigations', 'playbooks', 'overview'];
     for (const view of unauthorizedViews) {
       const isAllowed = AuthorizationService.isViewAuthorized(itOps.role, view);
       assert(!isAllowed, `IT Ops must NOT be authorized for ${view}`);
       const defView = AuthorizationService.getDefaultViewForRole(itOps.role);
-      assert(defView === 'tasks', 'Default view for IT Ops must be tasks');
+      assert(defView === 'itops_overview', 'Default view for IT Ops must be itops_overview');
     }
-    assert(AuthorizationService.isViewAuthorized(itOps.role, 'network'), 'IT Ops must be authorized for network');
+    assert(!AuthorizationService.isViewAuthorized(itOps.role, 'network' as any), 'IT Ops must NOT be authorized for network');
   });
 
   runTest('Test 7: Super Admin direct hash access to operational views falls back to default view "admin"', () => {
-    const operationalViews: WorkspaceView[] = ['alerts', 'tasks', 'investigations', 'playbooks', 'mitre', 'network', 'overview'];
+    const operationalViews: WorkspaceView[] = ['alerts', 'tasks', 'investigations', 'playbooks', 'mitre', 'overview'];
     for (const view of operationalViews) {
       const isAllowed = AuthorizationService.isViewAuthorized(admin.role, view);
       assert(!isAllowed, `Super Admin must NOT be authorized for ${view}`);
@@ -259,10 +322,10 @@ async function main() {
     }
   });
 
-  runTest('Test 8: Security Engineer direct hash access to admin or tasks falls back to default view "mitre"', () => {
+  runTest('Test 8: Security Engineer direct hash access to admin or tasks falls back to default view "seceng_overview"', () => {
     assert(!AuthorizationService.isViewAuthorized(engineer.role, 'admin'), 'Security Engineer must NOT be authorized for admin');
     assert(!AuthorizationService.isViewAuthorized(engineer.role, 'tasks'), 'Security Engineer must NOT be authorized for tasks');
-    assert(AuthorizationService.getDefaultViewForRole(engineer.role) === 'mitre', 'Default view must be mitre');
+    assert(AuthorizationService.getDefaultViewForRole(engineer.role) === 'seceng_overview', 'Default view must be seceng_overview');
   });
 
   runTest('Test 8b: SOC Analyst direct hash access to mitre, tasks, or admin falls back to default view "overview"', () => {

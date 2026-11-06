@@ -35,6 +35,7 @@ export interface SecurityAlert {
   hostName: string;
   userName?: string;
   mitreTechniqueId?: string; // Links to authentic MITRE technique e.g. T1059.001
+  attack_id?: string; // Standardized ATT&CK technique or sub-technique ID e.g. T1059.001
   mitreTacticId?: string; // e.g. TA0002
   confidenceScore: number; // 0 to 100
   evidence: AlertEvidence;

@@ -1,5 +1,6 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { IncidentTask } from '../../types/audit';
+import { SecurityAlert } from '../../types/alert';
 import { Button } from '../common/Button';
 import {
   CheckCircle2,
@@ -13,7 +14,10 @@ import {
   CheckSquare,
   Square,
   RefreshCw,
+  Cpu,
+  ShieldAlert,
 } from 'lucide-react';
+import { parseRemediationHistory } from '../../utils/remediationReview';
 
 export interface VerificationChecklistItem {
   id: string;
@@ -45,12 +49,36 @@ export const DEFAULT_VERIFICATION_CHECKLIST: VerificationChecklistItem[] = [
   },
 ];
 
+export const SIMULATION_VERIFICATION_CHECKLIST: VerificationChecklistItem[] = [
+  {
+    id: 'synthetic_telemetry',
+    label: 'Synthetic Telemetry & Scenario Payload Validated',
+    description: 'Confirmed synthetic event indicators and simulated behavior match the controlled detection scenario.',
+  },
+  {
+    id: 'containment_reviewed',
+    label: 'Simulated Containment & Recovery Procedure Formulated',
+    description: 'Reviewed and confirmed appropriate response playbook actions (e.g. host isolation or account lockout) for this scenario.',
+  },
+  {
+    id: 'telemetry_isolated',
+    label: 'Absence of Unintended Telemetry or Side Effects',
+    description: 'Audited simulation logs to ensure synthetic events did not produce anomalous secondary noise or unexpected execution.',
+  },
+  {
+    id: 'zero_prod_impact',
+    label: 'Zero Production Impact Attested',
+    description: 'Confirmed that zero operational endpoints or production credentials were altered or compromised.',
+  },
+];
+
 export interface RemediationVerificationData {
   completionNotes: string;
   checklist: Array<{ id: string; label: string; verified: boolean }>;
   evidenceReference?: string;
   attestationConfirmed: boolean;
   serializedNotes: string;
+  verificationType: 'simulation' | 'real';
 }
 
 interface RemediationVerificationModalProps {
@@ -59,6 +87,7 @@ interface RemediationVerificationModalProps {
   onClose: () => void;
   onConfirm: (taskId: string, verificationData: RemediationVerificationData) => Promise<void>;
   isSubmitting?: boolean;
+  associatedAlert?: SecurityAlert;
 }
 
 export const RemediationVerificationModal: React.FC<RemediationVerificationModalProps> = ({
@@ -67,17 +96,49 @@ export const RemediationVerificationModal: React.FC<RemediationVerificationModal
   onClose,
   onConfirm,
   isSubmitting = false,
+  associatedAlert,
 }) => {
+  const isSyntheticScenario = Boolean(
+    associatedAlert?.isSynthetic ||
+    associatedAlert?.provenance?.toLowerCase().includes('simulation') ||
+    associatedAlert?.provenance?.toLowerCase().includes('synthetic') ||
+    task.associatedAlertId?.toUpperCase().includes('SIM') ||
+    task.title.toLowerCase().includes('synthetic') ||
+    task.title.toLowerCase().includes('simulated')
+  );
+
+  const [verificationMode, setVerificationMode] = useState<'simulation' | 'real'>(
+    isSyntheticScenario ? 'simulation' : 'real'
+  );
+
   const [notes, setNotes] = useState('');
-  const [checkedItems, setCheckedItems] = useState<Record<string, boolean>>({
-    target_state: true,
-    fix_applied: true,
-    telemetry_clean: true,
-    operational_restoral: true,
-  });
+  const [checkedItems, setCheckedItems] = useState<Record<string, boolean>>({});
   const [evidenceReference, setEvidenceReference] = useState('');
   const [attestationConfirmed, setAttestationConfirmed] = useState(false);
   const [validationError, setValidationError] = useState<string | null>(null);
+
+  const activeChecklist =
+    verificationMode === 'simulation' ? SIMULATION_VERIFICATION_CHECKLIST : DEFAULT_VERIFICATION_CHECKLIST;
+
+  // Initialize checklist items when mode changes or on mount
+  useEffect(() => {
+    const initial: Record<string, boolean> = {};
+    activeChecklist.forEach((item) => {
+      initial[item.id] = true;
+    });
+    setCheckedItems(initial);
+  }, [verificationMode]);
+
+  // Reset mode to synthetic if task changes
+  useEffect(() => {
+    setVerificationMode(isSyntheticScenario ? 'simulation' : 'real');
+    setNotes('');
+    setEvidenceReference('');
+    setAttestationConfirmed(false);
+    setValidationError(null);
+  }, [task.id, isSyntheticScenario]);
+
+  const reworkHistory = parseRemediationHistory(task.completionNotes);
 
   if (!isOpen) return null;
 
@@ -95,40 +156,60 @@ export const RemediationVerificationModal: React.FC<RemediationVerificationModal
     // Validation rules
     const trimmedNotes = notes.trim();
     if (trimmedNotes.length < 10) {
-      setValidationError('Completion notes must be at least 10 characters describing the technical remediation performed.');
+      setValidationError(
+        verificationMode === 'simulation'
+          ? 'Completion notes must be at least 10 characters describing the simulation review performed.'
+          : 'Completion notes must be at least 10 characters describing the technical remediation performed.'
+      );
       return;
     }
 
     const verifiedCount = Object.values(checkedItems).filter(Boolean).length;
     if (verifiedCount === 0) {
-      setValidationError('You must record at least one verified remediation checklist step.');
+      setValidationError('You must record at least one verified checklist step.');
       return;
     }
 
     if (!attestationConfirmed) {
-      setValidationError('You must confirm the technical verification attestation before completing this task.');
+      setValidationError(
+        verificationMode === 'simulation'
+          ? 'You must confirm the simulation verification attestation before completing this task.'
+          : 'You must confirm the technical verification attestation before completing this task.'
+      );
       return;
     }
 
     // Build serialized notes to store in existing public.incident_tasks.completion_notes column
-    const verifiedLabels = DEFAULT_VERIFICATION_CHECKLIST.filter((item) => checkedItems[item.id]).map(
-      (item) => `[X] ${item.label}`
-    );
+    const verifiedLabels = activeChecklist
+      .filter((item) => checkedItems[item.id])
+      .map((item) => `[X] ${item.label}`);
 
     const serializedSections = [
       `Work Performed:\n${trimmedNotes}`,
-      `\n--- VERIFIED REMEDIATION CHECKLIST (${verifiedCount}/${DEFAULT_VERIFICATION_CHECKLIST.length}) ---\n${verifiedLabels.join('\n')}`,
+      `\nVerification Type: ${verificationMode === 'simulation' ? 'Controlled Simulation Verification' : 'Real Endpoint Remediation'}`,
+      `\n--- VERIFIED REMEDIATION CHECKLIST (${verifiedCount}/${activeChecklist.length}) ---\n${verifiedLabels.join('\n')}`,
     ];
 
     if (evidenceReference.trim()) {
       serializedSections.push(`\n--- TECHNICAL EVIDENCE & REFERENCE ---\n${evidenceReference.trim()}`);
     }
 
-    serializedSections.push(`\n--- ATTESTATION ---\nOperator certified independent technical verification on target asset "${task.targetAsset}" at ${new Date().toISOString()}`);
+    if (verificationMode === 'simulation') {
+      serializedSections.push(
+        `\n--- ATTESTATION ---\nOperator certified controlled simulation verification for synthetic alert "${task.associatedAlertId || 'N/A'}" on asset "${task.targetAsset}" at ${new Date().toISOString()}. No real endpoint modifications executed.`
+      );
+    } else {
+      serializedSections.push(
+        `\n--- ATTESTATION ---\nOperator certified independent technical verification on target asset "${task.targetAsset}" at ${new Date().toISOString()}`
+      );
+    }
 
-    const serializedNotes = serializedSections.join('\n');
+    const currentSubmission = serializedSections.join('\n');
+    const serializedNotes = task.completionNotes
+      ? `${task.completionNotes.trim()}\n\n========================================\nREMEDIATION RESUBMISSION REPORT\n========================================\nResubmitted by: Operator certified at ${new Date().toISOString()}\n${currentSubmission}`
+      : currentSubmission;
 
-    const checklistData = DEFAULT_VERIFICATION_CHECKLIST.map((item) => ({
+    const checklistData = activeChecklist.map((item) => ({
       id: item.id,
       label: item.label,
       verified: Boolean(checkedItems[item.id]),
@@ -141,6 +222,7 @@ export const RemediationVerificationModal: React.FC<RemediationVerificationModal
         evidenceReference: evidenceReference.trim() || undefined,
         attestationConfirmed,
         serializedNotes,
+        verificationType: verificationMode,
       });
       onClose();
     } catch (err: any) {
@@ -159,12 +241,24 @@ export const RemediationVerificationModal: React.FC<RemediationVerificationModal
         {/* Modal Header */}
         <div className="p-4 border-b border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-950/80 flex items-center justify-between shrink-0">
           <div className="flex items-center gap-2.5">
-            <div className="p-2 rounded-lg bg-emerald-50 dark:bg-emerald-950/80 border border-emerald-200 dark:border-emerald-800 text-emerald-600 dark:text-emerald-400">
-              <ShieldCheck className="w-5 h-5" />
+            <div
+              className={`p-2 rounded-lg border ${
+                verificationMode === 'simulation'
+                  ? 'bg-purple-50 dark:bg-purple-950/80 border-purple-200 dark:border-purple-800 text-purple-600 dark:text-purple-400'
+                  : 'bg-emerald-50 dark:bg-emerald-950/80 border-emerald-200 dark:border-emerald-800 text-emerald-600 dark:text-emerald-400'
+              }`}
+            >
+              {verificationMode === 'simulation' ? (
+                <Cpu className="w-5 h-5" />
+              ) : (
+                <ShieldCheck className="w-5 h-5" />
+              )}
             </div>
             <div>
               <h2 id="verification-modal-title" className="text-sm font-bold flex items-center gap-2">
-                Remediation Verification & Task Completion
+                {verificationMode === 'simulation'
+                  ? 'Controlled Simulation Verification & Task Completion'
+                  : 'Remediation Verification & Task Completion'}
                 <span className="font-mono text-xs px-2 py-0.5 rounded bg-amber-50 text-amber-800 border border-amber-200 dark:bg-amber-950 dark:text-amber-300 dark:border-amber-800">
                   {task.id}
                 </span>
@@ -191,8 +285,67 @@ export const RemediationVerificationModal: React.FC<RemediationVerificationModal
           </button>
         </div>
 
+        {/* Verification Path Selector Tab Bar */}
+        <div className="flex border-b border-slate-200 dark:border-slate-800 bg-slate-100/60 dark:bg-slate-950/50 px-4 gap-2 pt-2 text-xs font-mono">
+          <button
+            type="button"
+            onClick={() => setVerificationMode('simulation')}
+            className={`flex items-center gap-1.5 px-3 py-2 border-b-2 font-medium transition cursor-pointer ${
+              verificationMode === 'simulation'
+                ? 'border-purple-600 text-purple-700 dark:text-purple-300 bg-white dark:bg-slate-900 font-bold rounded-t'
+                : 'border-transparent text-slate-500 hover:text-slate-800 dark:hover:text-slate-200'
+            }`}
+          >
+            <Cpu className="w-3.5 h-3.5 text-purple-500" />
+            <span>Controlled Simulation Verification</span>
+            {isSyntheticScenario && (
+              <span className="text-[9px] px-1.5 py-0.2 rounded bg-purple-100 dark:bg-purple-900 text-purple-800 dark:text-purple-200 font-bold uppercase">
+                Synthetic Alert
+              </span>
+            )}
+          </button>
+
+          <button
+            type="button"
+            onClick={() => setVerificationMode('real')}
+            className={`flex items-center gap-1.5 px-3 py-2 border-b-2 font-medium transition cursor-pointer ${
+              verificationMode === 'real'
+                ? 'border-emerald-600 text-emerald-700 dark:text-emerald-300 bg-white dark:bg-slate-900 font-bold rounded-t'
+                : 'border-transparent text-slate-500 hover:text-slate-800 dark:hover:text-slate-200'
+            }`}
+          >
+            <ShieldCheck className="w-3.5 h-3.5 text-emerald-500" />
+            <span>Real Endpoint Remediation</span>
+          </button>
+        </div>
+
         {/* Modal Body / Form */}
         <form onSubmit={handleSubmit} className="p-5 overflow-y-auto space-y-4 flex-1 text-xs">
+          {/* Path Context Notice */}
+          {verificationMode === 'simulation' ? (
+            <div className="p-3 bg-purple-50 dark:bg-purple-950/50 border border-purple-200 dark:border-purple-800/80 rounded-lg text-purple-900 dark:text-purple-200 space-y-1">
+              <div className="flex items-center gap-1.5 font-bold font-mono text-[11px] text-purple-800 dark:text-purple-300">
+                <Info className="w-4 h-4 text-purple-600 dark:text-purple-400 shrink-0" />
+                <span>CONTROLLED SIMULATION EXERCISE VERIFICATION</span>
+              </div>
+              <p className="text-[11px] text-purple-800 dark:text-purple-300 leading-relaxed">
+                This task is associated with a synthetic simulation scenario. No live changes were made to physical infrastructure.
+                Attest truthfully to reviewing the synthetic telemetry and containment readiness without asserting real endpoint modifications.
+              </p>
+            </div>
+          ) : (
+            <div className="p-3 bg-slate-50 dark:bg-slate-950/60 border border-slate-200 dark:border-slate-800/80 rounded-lg space-y-1">
+              <div className="flex items-center gap-1.5 font-bold font-mono text-[11px] text-emerald-700 dark:text-emerald-300">
+                <ShieldCheck className="w-4 h-4 text-emerald-600 shrink-0" />
+                <span>OPERATIONAL PRODUCTION REMEDIATION</span>
+              </div>
+              <p className="text-[11px] text-slate-600 dark:text-slate-400 leading-relaxed">
+                Standard technical verification for operational endpoints. Requires independent confirmation that physical/credential
+                containment was executed and production baseline was validated.
+              </p>
+            </div>
+          )}
+
           {/* Task Summary Banner */}
           <div className="p-3 bg-slate-50 dark:bg-slate-950/60 border border-slate-200 dark:border-slate-800/80 rounded-lg space-y-1">
             <span className="text-[10px] font-mono uppercase text-slate-400 font-bold block">
@@ -200,6 +353,22 @@ export const RemediationVerificationModal: React.FC<RemediationVerificationModal
             </span>
             <p className="text-xs text-slate-700 dark:text-slate-300">{task.description}</p>
           </div>
+
+          {/* Rework Requested Notification Banner */}
+          {reworkHistory.latestReworkInstructions && (
+            <div className="p-3 bg-orange-50 dark:bg-orange-950/60 border border-orange-200 dark:border-orange-800 rounded-lg text-orange-900 dark:text-orange-200 space-y-1.5">
+              <div className="flex items-center gap-2 font-mono font-bold text-[11px] text-orange-700 dark:text-orange-300">
+                <RefreshCw className="w-3.5 h-3.5" />
+                <span>Rework Instructions from {reworkHistory.latestReview?.reviewerName || 'SOC Analyst'}:</span>
+              </div>
+              <p className="text-xs bg-white dark:bg-slate-900 p-2.5 rounded border border-orange-200 dark:border-orange-900/60 font-mono text-slate-800 dark:text-slate-200 whitespace-pre-wrap">
+                {reworkHistory.latestReworkInstructions}
+              </p>
+              <span className="text-[10px] text-orange-600 dark:text-orange-400 block font-mono">
+                Address the instructions above. Your previous submissions and this new verification will both be preserved.
+              </span>
+            </div>
+          )}
 
           {/* Validation Error Banner */}
           {validationError && (
@@ -217,15 +386,17 @@ export const RemediationVerificationModal: React.FC<RemediationVerificationModal
             <div className="flex items-center justify-between">
               <label className="font-bold text-xs uppercase font-mono tracking-wider text-slate-700 dark:text-slate-300 flex items-center gap-1.5">
                 <CheckSquare className="w-4 h-4 text-emerald-500" />
-                Technical Verification Checklist
+                {verificationMode === 'simulation'
+                  ? 'Controlled Simulation Verification Checklist'
+                  : 'Technical Verification Checklist'}
               </label>
               <span className="text-[10px] text-slate-400 font-mono">
-                {Object.values(checkedItems).filter(Boolean).length} of {DEFAULT_VERIFICATION_CHECKLIST.length} attested
+                {Object.values(checkedItems).filter(Boolean).length} of {activeChecklist.length} attested
               </span>
             </div>
 
             <div className="space-y-1.5 bg-slate-50 dark:bg-slate-950/70 border border-slate-200 dark:border-slate-800 rounded-lg p-2.5">
-              {DEFAULT_VERIFICATION_CHECKLIST.map((item) => {
+              {activeChecklist.map((item) => {
                 const isChecked = Boolean(checkedItems[item.id]);
 
                 return (
@@ -233,7 +404,9 @@ export const RemediationVerificationModal: React.FC<RemediationVerificationModal
                     key={item.id}
                     className={`flex items-start gap-2.5 p-2 rounded cursor-pointer transition select-none ${
                       isChecked
-                        ? 'bg-emerald-50/60 dark:bg-emerald-950/30 border border-emerald-200 dark:border-emerald-900/50'
+                        ? verificationMode === 'simulation'
+                          ? 'bg-purple-50/60 dark:bg-purple-950/30 border border-purple-200 dark:border-purple-900/50'
+                          : 'bg-emerald-50/60 dark:bg-emerald-950/30 border border-emerald-200 dark:border-emerald-900/50'
                         : 'hover:bg-slate-100 dark:hover:bg-slate-900 border border-transparent'
                     }`}
                   >
@@ -263,7 +436,10 @@ export const RemediationVerificationModal: React.FC<RemediationVerificationModal
             <div className="flex items-center justify-between">
               <label htmlFor="completion-notes" className="font-bold text-xs uppercase font-mono tracking-wider text-slate-700 dark:text-slate-300 flex items-center gap-1.5">
                 <FileText className="w-4 h-4 text-blue-500" />
-                Work Performed & Remediation Notes <span className="text-rose-500">*</span>
+                {verificationMode === 'simulation'
+                  ? 'Simulation Findings & Review Notes'
+                  : 'Work Performed & Remediation Notes'}{' '}
+                <span className="text-rose-500">*</span>
               </label>
               <span className="text-[10px] text-slate-400 font-mono">
                 Min 10 characters ({notes.trim().length} entered)
@@ -275,7 +451,11 @@ export const RemediationVerificationModal: React.FC<RemediationVerificationModal
               onChange={(e) => setNotes(e.target.value)}
               disabled={isSubmitting}
               rows={3}
-              placeholder="Detail specific remediation work performed (e.g., credentials revoked on domain controller, host quarantine verified, backup snapshot hashes compared)..."
+              placeholder={
+                verificationMode === 'simulation'
+                  ? 'Detail simulation review findings (e.g., reviewed synthetic ransomware IoCs, validated process telemetry, containment playbook formulated)...'
+                  : 'Detail specific remediation work performed (e.g., credentials revoked on domain controller, host quarantine verified, backup snapshot hashes compared)...'
+              }
               className="w-full bg-slate-50 dark:bg-slate-950 border border-slate-300 dark:border-slate-700 rounded-lg p-2.5 text-xs text-slate-900 dark:text-slate-100 placeholder:text-slate-400 dark:placeholder:text-slate-600 focus:ring-1 focus:ring-emerald-500 dark:focus:ring-emerald-400 focus:outline-none"
               required
             />
@@ -285,7 +465,7 @@ export const RemediationVerificationModal: React.FC<RemediationVerificationModal
           <div className="space-y-1.5">
             <label htmlFor="evidence-reference" className="font-bold text-xs uppercase font-mono tracking-wider text-slate-700 dark:text-slate-300 flex items-center gap-1.5">
               <Terminal className="w-4 h-4 text-amber-500" />
-              Evidence Reference / Command Output <span className="text-slate-400 text-[10px] lowercase font-normal">(optional)</span>
+              Evidence Reference / Scenario Reference <span className="text-slate-400 text-[10px] lowercase font-normal">(optional)</span>
             </label>
             <input
               id="evidence-reference"
@@ -293,25 +473,54 @@ export const RemediationVerificationModal: React.FC<RemediationVerificationModal
               value={evidenceReference}
               onChange={(e) => setEvidenceReference(e.target.value)}
               disabled={isSubmitting}
-              placeholder="e.g. Script verification hash, firewall rule ID, or shell command output..."
+              placeholder={
+                verificationMode === 'simulation'
+                  ? 'e.g. Synthetic event log reference, simulated playbook ID, or test verification artifact...'
+                  : 'e.g. Script verification hash, firewall rule ID, or shell command output...'
+              }
               className="w-full bg-slate-50 dark:bg-slate-950 border border-slate-300 dark:border-slate-700 rounded-lg px-2.5 py-1.5 text-xs text-slate-900 dark:text-slate-100 placeholder:text-slate-400 dark:placeholder:text-slate-600 focus:ring-1 focus:ring-emerald-500 dark:focus:ring-emerald-400 focus:outline-none font-mono"
             />
           </div>
 
           {/* Section 4: Mandatory Operator Attestation */}
-          <div className="p-3 bg-amber-50/70 dark:bg-amber-950/40 border border-amber-200 dark:border-amber-900/60 rounded-lg">
+          <div
+            className={`p-3 rounded-lg border ${
+              verificationMode === 'simulation'
+                ? 'bg-purple-50/70 dark:bg-purple-950/40 border-purple-200 dark:border-purple-900/60'
+                : 'bg-amber-50/70 dark:bg-amber-950/40 border-amber-200 dark:border-amber-900/60'
+            }`}
+          >
             <label className="flex items-start gap-2.5 cursor-pointer select-none">
               <input
                 type="checkbox"
                 checked={attestationConfirmed}
                 onChange={(e) => setAttestationConfirmed(e.target.checked)}
                 disabled={isSubmitting}
-                className="mt-0.5 rounded text-amber-600 focus:ring-amber-500 cursor-pointer"
+                className={`mt-0.5 rounded cursor-pointer ${
+                  verificationMode === 'simulation'
+                    ? 'text-purple-600 focus:ring-purple-500'
+                    : 'text-amber-600 focus:ring-amber-500'
+                }`}
               />
-              <div className="text-xs text-amber-900 dark:text-amber-200 leading-relaxed">
-                <span className="font-bold">Operator Verification Attestation: </span>
-                I confirm that this technical remediation was independently executed and verified on{' '}
-                <strong className="font-mono">{task.targetAsset}</strong> in accordance with CyberOps SOC incident response procedures.
+              <div
+                className={`text-xs leading-relaxed ${
+                  verificationMode === 'simulation'
+                    ? 'text-purple-900 dark:text-purple-200'
+                    : 'text-amber-900 dark:text-amber-200'
+                }`}
+              >
+                {verificationMode === 'simulation' ? (
+                  <>
+                    <span className="font-bold">Controlled Simulation Verification Attestation: </span>
+                    I confirm that I have reviewed the synthetic detection telemetry for this controlled simulation exercise and confirmed appropriate containment procedures without executing real destructive changes on production endpoints.
+                  </>
+                ) : (
+                  <>
+                    <span className="font-bold">Operator Verification Attestation: </span>
+                    I confirm that this technical remediation was independently executed and verified on{' '}
+                    <strong className="font-mono">{task.targetAsset}</strong> in accordance with CyberOps SOC incident response procedures.
+                  </>
+                )}
               </div>
             </label>
           </div>
@@ -343,7 +552,11 @@ export const RemediationVerificationModal: React.FC<RemediationVerificationModal
               variant="primary"
               size="sm"
               disabled={isSubmitting}
-              className="bg-emerald-600 hover:bg-emerald-700 dark:bg-emerald-600 dark:hover:bg-emerald-500 text-white"
+              className={
+                verificationMode === 'simulation'
+                  ? 'bg-purple-600 hover:bg-purple-700 text-white'
+                  : 'bg-emerald-600 hover:bg-emerald-700 dark:bg-emerald-600 dark:hover:bg-emerald-500 text-white'
+              }
             >
               {isSubmitting ? (
                 <>
@@ -353,7 +566,9 @@ export const RemediationVerificationModal: React.FC<RemediationVerificationModal
               ) : (
                 <>
                   <CheckCircle2 className="w-3.5 h-3.5 mr-1.5" />
-                  Confirm & Complete Task
+                  {verificationMode === 'simulation'
+                    ? 'Confirm & Complete Simulation Review'
+                    : 'Confirm & Complete Task'}
                 </>
               )}
             </Button>

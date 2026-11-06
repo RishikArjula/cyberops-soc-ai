@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo, useCallback } from 'react';
+import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import { AuthProvider, useAuth } from './context/AuthContext';
 import { UserRole, ROLE_METADATA } from './types/auth';
 import { SecurityAlert, AlertStatus } from './types/alert';
@@ -8,7 +8,6 @@ import { ResponseActionType, AuditLogEntry, IncidentTask } from './types/audit';
 import { getRepositories } from './repositories';
 import { DeterministicTriageService } from './services/deterministicTriageService';
 import { AuthorizationService } from './services/authorizationService';
-import { SAMPLE_NETWORK_FLOWS } from './data/networkFlows';
 
 // Modular Layouts
 import { PublicLayout } from './layouts/PublicLayout';
@@ -32,13 +31,19 @@ import { UserProfilePage } from './components/common/UserProfilePage';
 import { AlertDetailDrawer } from './components/analyst/AlertDetailDrawer';
 import { SimulateActionModal } from './components/analyst/SimulateActionModal';
 import { SecurityEngineerDashboard } from './components/security-engineer/SecurityEngineerDashboard';
+import { SecurityEngineerOverviewPage } from './components/security-engineer/SecurityEngineerOverviewPage';
 import { ITOperationsDashboard } from './components/it-operations/ITOperationsDashboard';
 import { PlatformAdminDashboard } from './components/admin/PlatformAdminDashboard';
 import { AuditLogViewer } from './components/audit/AuditLogViewer';
-import { NetworkFlowViewer } from './components/network/NetworkFlowViewer';
+import { SocAnalystKnowledgeRecord, fetchSocAnalystKnowledge } from './services/knowledgeService';
+import { SocAnalystWorkspace, SocKnowledgeView } from './components/analyst/SocAnalystWorkspace';
+import { ItOpsWorkspace } from './components/it-operations/knowledge/ItOpsWorkspace';
+import { ItOpsKnowledgeView } from './components/it-operations/knowledge/types';
+import { checkAlertClosureEligibility } from './utils/remediationReview';
+import { DetectionRecommendation, CreateRecommendationInput } from './types/recommendation';
 
-// Repository bundle adhering to IAlertRepository, IMITRERepository, and IAuditLogRepository
-const { alertRepo, mitreRepo, auditRepo, isLive } = getRepositories();
+// Repository bundle adhering to IAlertRepository, IMITRERepository, IAuditLogRepository, and IDetectionRecommendationRepository
+const { alertRepo, mitreRepo, auditRepo, recommendationRepo, isLive } = getRepositories();
 const triageService = new DeterministicTriageService();
 
 const STORAGE_IN_WORKSPACE = 'cyberops_soc_in_workspace';
@@ -48,13 +53,21 @@ const STORAGE_PUBLIC_ROUTE = 'cyberops_soc_public_route';
 const VALID_PUBLIC_ROUTES: PublicRoute[] = ['home', 'features', 'about', 'contact', 'login', 'register'];
 
 const VALID_WORKSPACE_VIEWS: WorkspaceView[] = [
+  'seceng_overview',
   'overview',
+  'strategies',
+  'analytics',
+  'log_sources',
+  'data_components',
+  'mitre_explorer',
+  'itops_overview',
+  'itops_techniques',
+  'itops_mitigations',
   'alerts',
   'investigations',
   'playbooks',
   'mitre',
   'tasks',
-  'network',
   'audit',
   'admin',
   'profile',
@@ -62,9 +75,22 @@ const VALID_WORKSPACE_VIEWS: WorkspaceView[] = [
 
 const parsePublicRouteFromHash = (hashStr: string): PublicRoute | null => {
   if (!hashStr) return null;
-  const clean = hashStr.replace(/^#\/?/, '').toLowerCase().trim();
-  if (VALID_PUBLIC_ROUTES.includes(clean as PublicRoute)) {
-    return clean as PublicRoute;
+  const hashWithoutPrefix = hashStr.replace(/^#\/?/, '').trim();
+  const routeName = hashWithoutPrefix.split(/[?&#]/)[0].toLowerCase().trim();
+  if (VALID_PUBLIC_ROUTES.includes(routeName as PublicRoute)) {
+    return routeName as PublicRoute;
+  }
+  // If hash contains authentication, recovery, or verification tokens, route to login component
+  if (
+    hashWithoutPrefix.includes('access_token=') ||
+    hashWithoutPrefix.includes('token_hash=') ||
+    hashWithoutPrefix.includes('type=signup') ||
+    hashWithoutPrefix.includes('type=recovery') ||
+    hashWithoutPrefix.includes('error_code=') ||
+    hashWithoutPrefix.includes('error=') ||
+    hashWithoutPrefix.includes('reset-password')
+  ) {
+    return 'login';
   }
   return null;
 };
@@ -114,6 +140,20 @@ const getInitialWorkspaceView = (): WorkspaceView => {
 
 const getInitialPublicRoute = (): PublicRoute => {
   if (typeof window !== 'undefined') {
+    const search = window.location.search || '';
+    if (
+      search.includes('token_hash=') ||
+      search.includes('type=signup') ||
+      search.includes('error_code=') ||
+      search.includes('error=') ||
+      search.includes('code=')
+    ) {
+      try {
+        sessionStorage.setItem(STORAGE_PUBLIC_ROUTE, 'login');
+      } catch {}
+      return 'login';
+    }
+
     // 1. URL hash is primary source of truth
     const fromHash = parsePublicRouteFromHash(window.location.hash);
     if (fromHash) {
@@ -145,6 +185,13 @@ function AppContent() {
   const [publicRoute, setPublicRoute] = useState<PublicRoute>(getInitialPublicRoute);
   const [workspaceView, setWorkspaceView] = useState<WorkspaceView>(getInitialWorkspaceView);
   const [auditFilterAlertId, setAuditFilterAlertId] = useState<string | undefined>(undefined);
+  const [alertsError, setAlertsError] = useState<string | null>(null);
+  const [tasksError, setTasksError] = useState<string | null>(null);
+  const [auditError, setAuditError] = useState<string | null>(null);
+
+  const [isAlertsLoading, setIsAlertsLoading] = useState<boolean>(false);
+  const [isTasksLoading, setIsTasksLoading] = useState<boolean>(false);
+  const [isAuditLoading, setIsAuditLoading] = useState<boolean>(false);
 
   // Application Data State
   const [alerts, setAlerts] = useState<SecurityAlert[]>([]);
@@ -154,7 +201,36 @@ function AppContent() {
   const [coverage, setCoverage] = useState<MitreDefenseCoverage[]>([]);
   const [auditLogs, setAuditLogs] = useState<AuditLogEntry[]>([]);
   const [tasks, setTasks] = useState<IncidentTask[]>([]);
+  const [recommendations, setRecommendations] = useState<DetectionRecommendation[]>([]);
+  const [isRecommendationsLoading, setIsRecommendationsLoading] = useState(false);
+  const [recommendationsError, setRecommendationsError] = useState<string | null>(null);
+  const [socKnowledge, setSocKnowledge] = useState<SocAnalystKnowledgeRecord[]>([]);
   const [isLoading, setIsLoading] = useState(true);
+
+  // Concurrency, in-flight deduplication, and stale response sequence tracking
+  const inFlightRef = useRef<{
+    alerts: boolean;
+    tasks: boolean;
+    audit: boolean;
+    recommendations: boolean;
+  }>({
+    alerts: false,
+    tasks: false,
+    audit: false,
+    recommendations: false,
+  });
+
+  const requestSeqRef = useRef<{
+    alerts: number;
+    tasks: number;
+    audit: number;
+    recommendations: number;
+  }>({
+    alerts: 0,
+    tasks: 0,
+    audit: 0,
+    recommendations: 0,
+  });
 
   // Selected Alert for Deep Triage Drawer
   const [selectedAlert, setSelectedAlert] = useState<SecurityAlert | null>(null);
@@ -171,7 +247,257 @@ function AppContent() {
     target: '',
   });
 
-  // Load data scoped to active user
+  // Dedicated Alert Fetcher with Deduplication & Error Propagation
+  const fetchAlerts = useCallback(async (force = false) => {
+    if (!currentUser) {
+      if (isLive) {
+        setAlerts([]);
+        setAlertsError(null);
+      } else {
+        try {
+          const defaultAlerts = await alertRepo.getAlertsForUser({
+            id: 'anon',
+            name: 'Anonymous',
+            email: 'anon@guest',
+            role: 'soc_analyst',
+            callsign: 'GUEST',
+            title: 'Guest Visitor',
+          });
+          setAlerts(defaultAlerts);
+          setAlertsError(null);
+        } catch {
+          setAlerts([]);
+        }
+      }
+      return;
+    }
+
+    if (currentUser.role === 'super_admin') {
+      setAlerts([]);
+      setAlertsError(null);
+      return;
+    }
+
+    // Prevent duplicate simultaneous requests unless explicitly forced
+    if (inFlightRef.current.alerts && !force) {
+      return;
+    }
+
+    inFlightRef.current.alerts = true;
+    const seq = ++requestSeqRef.current.alerts;
+    setIsAlertsLoading(true);
+
+    try {
+      const fetchedAlerts = await alertRepo.getAlertsForUser(currentUser);
+      if (requestSeqRef.current.alerts === seq) {
+        setAlerts(fetchedAlerts);
+        setAlertsError(null);
+      }
+    } catch (err: any) {
+      console.error('Failed to query operational alerts:', err?.message || err);
+      if (requestSeqRef.current.alerts === seq) {
+        setAlertsError(err?.message || 'Database query failed or access denied.');
+        setAlerts([]);
+      }
+    } finally {
+      if (requestSeqRef.current.alerts === seq) {
+        setIsAlertsLoading(false);
+      }
+      inFlightRef.current.alerts = false;
+    }
+  }, [currentUser]);
+
+  // Dedicated Incident Task Fetcher with Deduplication & Explicit Error Handling
+  const fetchTasks = useCallback(async (force = false) => {
+    if (!currentUser || currentUser.role === 'super_admin') {
+      setTasks([]);
+      setTasksError(null);
+      return;
+    }
+
+    // Prevent duplicate simultaneous requests unless explicitly forced
+    if (inFlightRef.current.tasks && !force) {
+      return;
+    }
+
+    inFlightRef.current.tasks = true;
+    const seq = ++requestSeqRef.current.tasks;
+    setIsTasksLoading(true);
+
+    try {
+      const fetchedTasks = await auditRepo.getIncidentTasksForUser(currentUser);
+      if (requestSeqRef.current.tasks === seq) {
+        setTasks(fetchedTasks);
+        setTasksError(null);
+      }
+    } catch (err: any) {
+      console.error('Failed to query incident tasks:', err?.message || err);
+      if (requestSeqRef.current.tasks === seq) {
+        setTasksError(err?.message || 'Failed to query incident response tasks.');
+        setTasks([]);
+      }
+    } finally {
+      if (requestSeqRef.current.tasks === seq) {
+        setIsTasksLoading(false);
+      }
+      inFlightRef.current.tasks = false;
+    }
+  }, [currentUser]);
+
+  // Dedicated Audit Log Fetcher with Deduplication & Explicit Error Handling
+  const fetchAuditLogs = useCallback(async (force = false) => {
+    if (!currentUser) {
+      setAuditLogs([]);
+      setAuditError(null);
+      return;
+    }
+
+    // Prevent duplicate simultaneous requests unless explicitly forced
+    if (inFlightRef.current.audit && !force) {
+      return;
+    }
+
+    inFlightRef.current.audit = true;
+    const seq = ++requestSeqRef.current.audit;
+    setIsAuditLoading(true);
+
+    try {
+      const fetchedLogs = await auditRepo.getLogsForUser(currentUser);
+      if (requestSeqRef.current.audit === seq) {
+        setAuditLogs(fetchedLogs);
+        setAuditError(null);
+      }
+    } catch (err: any) {
+      console.error('Failed to query audit logs:', err?.message || err);
+      if (requestSeqRef.current.audit === seq) {
+        setAuditError(err?.message || 'Failed to query audit log trail.');
+        setAuditLogs([]);
+      }
+    } finally {
+      if (requestSeqRef.current.audit === seq) {
+        setIsAuditLoading(false);
+      }
+      inFlightRef.current.audit = false;
+    }
+  }, [currentUser]);
+
+  // Dedicated Detection Recommendation Fetcher with Deduplication & Error Propagation
+  const fetchRecommendations = useCallback(async (force = false) => {
+    if (!currentUser || currentUser.role === 'super_admin' || currentUser.role === 'it_operations') {
+      setRecommendations([]);
+      setRecommendationsError(null);
+      return;
+    }
+
+    if (inFlightRef.current.recommendations && !force) {
+      return;
+    }
+
+    inFlightRef.current.recommendations = true;
+    const seq = ++requestSeqRef.current.recommendations;
+    setIsRecommendationsLoading(true);
+
+    try {
+      const fetched = await recommendationRepo.getRecommendationsForUser(currentUser);
+      if (requestSeqRef.current.recommendations === seq) {
+        setRecommendations(fetched);
+        setRecommendationsError(null);
+      }
+    } catch (err: any) {
+      console.error('Failed to query detection recommendations:', err?.message || err);
+      if (requestSeqRef.current.recommendations === seq) {
+        setRecommendationsError(err?.message || 'Failed to query detection recommendations.');
+        setRecommendations([]);
+      }
+    } finally {
+      if (requestSeqRef.current.recommendations === seq) {
+        setIsRecommendationsLoading(false);
+      }
+      inFlightRef.current.recommendations = false;
+    }
+  }, [currentUser]);
+
+  // Recommendation Action Handlers
+  const handleCreateRecommendation = useCallback(async (input: CreateRecommendationInput) => {
+    if (!currentUser) return;
+    const created = await recommendationRepo.createRecommendation(currentUser, input);
+    setRecommendations((prev) => [created, ...prev]);
+    fetchAuditLogs(true);
+  }, [currentUser, fetchAuditLogs]);
+
+  const handleReviewRecommendation = useCallback(async (
+    id: string,
+    action: 'accept' | 'reject' | 'request_clarification',
+    feedback?: string
+  ) => {
+    if (!currentUser) return;
+    const updated = await recommendationRepo.reviewRecommendation(currentUser, id, action, feedback);
+    setRecommendations((prev) => prev.map((r) => (r.id === id ? updated : r)));
+    fetchAuditLogs(true);
+  }, [currentUser, fetchAuditLogs]);
+
+  const handleUpdateRecommendationImplementation = useCallback(async (
+    id: string,
+    status: 'in_progress' | 'completed',
+    notes?: string,
+    sigmaRef?: string
+  ) => {
+    if (!currentUser) return;
+    const updated = await recommendationRepo.updateImplementation(currentUser, id, status, notes, sigmaRef);
+    setRecommendations((prev) => prev.map((r) => (r.id === id ? updated : r)));
+    fetchAuditLogs(true);
+  }, [currentUser, fetchAuditLogs]);
+
+  const handleValidateRecommendation = useCallback(async (
+    id: string,
+    feedback?: string
+  ) => {
+    if (!currentUser) return;
+    const updated = await recommendationRepo.validateRecommendation(currentUser, id, feedback);
+    setRecommendations((prev) => prev.map((r) => (r.id === id ? updated : r)));
+    fetchAuditLogs(true);
+  }, [currentUser, fetchAuditLogs]);
+
+  // Controlled Simulated Alert Dispatcher (Windows Event Detection Pipeline)
+  const handleSimulateAlert = useCallback(async (simulatedAlert: SecurityAlert): Promise<void> => {
+    if (!currentUser) {
+      throw new Error('User session not found.');
+    }
+
+    // Security Engineers are architecturally read-only on operational alerts:
+    // Generate local preview without attempting unauthorized database insert.
+    if (currentUser.role === 'security_engineer') {
+      return;
+    }
+
+    // SOC Analysts have authorized INSERT rights under alerts_insert_policy
+    if (currentUser.role === 'soc_analyst') {
+      if (!alertRepo.addSimulatedAlert) {
+        throw new Error('Alert repository does not support simulated alert persistence.');
+      }
+      const savedAlert = await alertRepo.addSimulatedAlert(simulatedAlert);
+      setAlerts((prev) => [savedAlert, ...prev.filter((a) => a.id !== savedAlert.id)]);
+      setSelectedAlert((prev) => (prev?.id === savedAlert.id ? savedAlert : prev));
+      return;
+    }
+
+    throw new Error(`Role "${currentUser.role}" is not authorized to create operational alerts.`);
+  }, [currentUser, alertRepo]);
+
+  // Retry Handlers invoking fresh data requests
+  const handleRetryTasks = useCallback(() => {
+    fetchTasks(true);
+  }, [fetchTasks]);
+
+  const handleRetryAlerts = useCallback(() => {
+    fetchAlerts(true);
+  }, [fetchAlerts]);
+
+  const handleRetryAudit = useCallback(() => {
+    fetchAuditLogs(true);
+  }, [fetchAuditLogs]);
+
+  // Load initial reference data and user operational datasets
   const loadData = useCallback(async () => {
     try {
       setIsLoading(true);
@@ -192,48 +518,56 @@ function AppContent() {
       );
       setMitigations(fetchedMits.filter(Boolean) as MitreMitigation[]);
 
-      // Role-scoped operational data
-      if (currentUser) {
-        if (currentUser.role === 'super_admin') {
-          // Super Admin is isolated from private operational alerts and tasks
-          setAlerts([]);
-          setTasks([]);
-          const fetchedLogs = await auditRepo.getLogsForUser(currentUser);
-          setAuditLogs(fetchedLogs);
-        } else {
-          const [fetchedAlerts, fetchedTasks, fetchedLogs] = await Promise.all([
-            alertRepo.getAlertsForUser(currentUser),
-            auditRepo.getIncidentTasksForUser(currentUser),
-            auditRepo.getLogsForUser(currentUser),
-          ]);
-          setAlerts(fetchedAlerts);
-          setTasks(fetchedTasks);
-          setAuditLogs(fetchedLogs);
-        }
+      // Role-scoped operational data via decoupled fetchers
+      await Promise.all([
+        fetchAlerts(true),
+        fetchTasks(true),
+        fetchAuditLogs(true),
+        fetchRecommendations(true),
+      ]);
+
+      if (currentUser?.role === 'soc_analyst') {
+        fetchSocAnalystKnowledge(currentUser)
+          .then((records) => setSocKnowledge(records))
+          .catch((err) => console.error('Failed to load SOC Analyst knowledge:', err));
       } else {
-        // Default preview data for unauthenticated visitors in development/demo mode
-        if (isLive) {
-          setAlerts([]);
-        } else {
-          const defaultAlerts = await alertRepo.getAlertsForUser({
-            id: 'anon',
-            name: 'Anonymous',
-            email: 'anon@guest',
-            role: 'soc_analyst',
-            callsign: 'GUEST',
-            title: 'Guest Visitor',
-          });
-          setAlerts(defaultAlerts);
-        }
+        setSocKnowledge([]);
       }
+    } catch (globalErr: any) {
+      console.error('Error loading repository data:', globalErr);
+      setAlertsError(globalErr?.message || 'Failed to load system data.');
     } finally {
       setIsLoading(false);
     }
-  }, [currentUser]);
+  }, [currentUser, fetchAlerts, fetchTasks, fetchAuditLogs, fetchRecommendations]);
 
   useEffect(() => {
     loadData();
   }, [loadData]);
+
+  // Refresh operational datasets on navigation to tasks, alerts, or audit
+  const prevNavViewRef = useRef<WorkspaceView | null>(null);
+
+  useEffect(() => {
+    if (!inWorkspace || !isAuthenticated || !currentUser) {
+      prevNavViewRef.current = null;
+      return;
+    }
+
+    if (prevNavViewRef.current === workspaceView) return;
+    prevNavViewRef.current = workspaceView;
+
+    if (workspaceView === 'tasks') {
+      fetchTasks();
+    } else if (workspaceView === 'alerts') {
+      fetchAlerts();
+      fetchRecommendations();
+    } else if (workspaceView === 'audit') {
+      fetchAuditLogs();
+    } else if (workspaceView === 'mitre') {
+      fetchRecommendations();
+    }
+  }, [workspaceView, inWorkspace, isAuthenticated, currentUser, fetchTasks, fetchAlerts, fetchAuditLogs, fetchRecommendations]);
 
   // Explicit check ensuring only approved operators with assigned non-null roles can enter workspace
   const isApprovedOperator =
@@ -356,10 +690,37 @@ function AppContent() {
   // Alert operations with strict permission enforcement
   const handleUpdateAlertStatus = async (alertId: string, status: AlertStatus) => {
     if (!currentUser) return;
-    const updated = await alertRepo.updateAlertStatus(currentUser, alertId, status);
+
+    // Requirement 7: When an alert has associated remediation tasks, require all of them
+    // to have explicit SOC Analyst approval before allowing the alert to become resolved.
+    if (status === 'resolved') {
+      const eligibility = checkAlertClosureEligibility(alertId, tasks);
+      if (!eligibility.eligible) {
+        throw new Error(eligibility.reason || 'All associated remediation tasks must have explicit SOC Analyst approval before this alert can be resolved.');
+      }
+    }
+
+    const updated = await alertRepo.updateAlertStatus(currentUser, alertId, status, tasks);
     setAlerts((prev) => prev.map((a) => (a.id === alertId ? updated : a)));
     if (selectedAlert?.id === alertId) {
       setSelectedAlert(updated);
+    }
+
+    if (status === 'resolved') {
+      try {
+        const auditEntry = await auditRepo.recordSimulatedAction(currentUser, {
+          actionType: 'alert_resolved',
+          targetResource: updated.hostName || `Alert ${alertId}`,
+          justification: 'Operational alert resolved following verification and approval of all associated remediation tasks.',
+          status: 'SIMULATED_SUCCESS',
+          associatedAlertId: alertId,
+          systemNote: `Alert ${alertId} marked resolved by ${currentUser.name} (${currentUser.role}). All linked remediation tasks verified and approved.`,
+        });
+        setAuditLogs((prev) => [auditEntry, ...prev]);
+        fetchAuditLogs(true);
+      } catch (auditErr) {
+        console.warn('Non-fatal: failed to record alert_resolved audit log:', auditErr);
+      }
     }
   };
 
@@ -439,19 +800,39 @@ function AppContent() {
     }
   };
 
+  const handleCreateTask = async (taskData: Omit<IncidentTask, 'id' | 'createdAt'>): Promise<IncidentTask> => {
+    if (!currentUser) {
+      throw new Error('User session not found.');
+    }
+    const newTask = await auditRepo.createTask(currentUser, taskData);
+    setTasks((prev) => [newTask, ...prev.filter((t) => t.id !== newTask.id)]);
+    await fetchTasks(true);
+    fetchAuditLogs(true);
+    return newTask;
+  };
+
   const handleUpdateTaskStatus = async (taskId: string, status: IncidentTask['status'], notes?: string) => {
     if (!currentUser) return;
     const updated = await auditRepo.updateTaskStatus(currentUser, taskId, status, notes);
     setTasks((prev) => prev.map((t) => (t.id === taskId ? updated : t)));
-    // Refresh audit logs so newly emitted operational remediation_verified audit event immediately syncs in state
-    if (status === 'completed') {
-      try {
-        const refreshedLogs = await auditRepo.getLogsForUser(currentUser);
-        setAuditLogs(refreshedLogs);
-      } catch (err) {
-        console.error('Failed to reload audit logs after task completion:', err);
-      }
+    // Refresh audit logs so newly emitted operational audit events (remediation_started or remediation_verified) immediately sync in state
+    if (status === 'completed' || status === 'in_progress') {
+      fetchAuditLogs(true);
     }
+  };
+
+  const handleReviewTask = async (
+    taskId: string,
+    decision: 'approved' | 'rework_requested',
+    notes: string
+  ): Promise<void> => {
+    if (!currentUser) {
+      throw new Error('User session not found.');
+    }
+    const updated = await auditRepo.reviewRemediationTask(currentUser, taskId, decision, notes);
+    setTasks((prev) => prev.map((t) => (t.id === taskId ? updated : t)));
+    // Refresh audit logs so newly emitted review decision audit event immediately syncs in state
+    fetchAuditLogs(true);
   };
 
   // Selected Alert Computations
@@ -464,11 +845,6 @@ function AppContent() {
     if (!selectedMitreTechnique) return [];
     return mitigations.filter((m) => selectedMitreTechnique.mitigationIds.includes(m.id));
   }, [selectedMitreTechnique, mitigations]);
-
-  const selectedNetworkFlow = useMemo(() => {
-    if (!selectedAlert?.networkFlowId) return null;
-    return SAMPLE_NETWORK_FLOWS.find((f) => f.flowId === selectedAlert.networkFlowId) || null;
-  }, [selectedAlert]);
 
   const selectedTriageRecommendation = useMemo(() => {
     if (!selectedAlert) return null;
@@ -503,13 +879,20 @@ function AppContent() {
     const handleUrlChange = () => {
       if (typeof window === 'undefined') return;
       const rawHash = window.location.hash;
+      const search = window.location.search || '';
       const publicRouteFromHash = parsePublicRouteFromHash(rawHash);
       const workspaceViewFromHash = parseWorkspaceViewFromHash(rawHash);
+      const hasAuthSearch =
+        search.includes('token_hash=') ||
+        search.includes('type=signup') ||
+        search.includes('error_code=') ||
+        search.includes('code=');
 
-      if (publicRouteFromHash) {
-        setPublicRoute(publicRouteFromHash);
+      if (publicRouteFromHash || hasAuthSearch) {
+        const targetRoute = publicRouteFromHash || 'login';
+        setPublicRoute(targetRoute);
         try {
-          sessionStorage.setItem(STORAGE_PUBLIC_ROUTE, publicRouteFromHash);
+          sessionStorage.setItem(STORAGE_PUBLIC_ROUTE, targetRoute);
           sessionStorage.removeItem(STORAGE_IN_WORKSPACE);
         } catch {}
         setInWorkspace(false);
@@ -720,11 +1103,57 @@ function AppContent() {
           <PlatformAdminDashboard currentUser={currentUser} />
         )}
 
-        {effectiveView === 'overview' && AuthorizationService.isViewAuthorized(currentUser.role, 'overview') && (
+        {currentUser.role === 'soc_analyst' &&
+          [
+            'overview',
+            'strategies',
+            'analytics',
+            'log_sources',
+            'data_components',
+            'mitre_explorer',
+          ].includes(effectiveView) && (
+            <SocAnalystWorkspace
+              currentView={effectiveView as SocKnowledgeView}
+              onNavigateView={(newView) => {
+                setWorkspaceView(newView);
+                try {
+                  sessionStorage.setItem(STORAGE_WORKSPACE_VIEW, newView);
+                } catch {}
+                if (typeof window !== 'undefined' && window.location.hash !== `#${newView}`) {
+                  window.history.pushState({ view: newView }, '', `#${newView}`);
+                }
+              }}
+              currentUser={currentUser}
+            />
+          )}
+
+        {currentUser.role === 'it_operations' &&
+          [
+            'itops_overview',
+            'itops_techniques',
+            'itops_mitigations',
+          ].includes(effectiveView) && (
+            <ItOpsWorkspace
+              currentView={effectiveView as ItOpsKnowledgeView}
+              onNavigateView={(newView) => {
+                setWorkspaceView(newView);
+                try {
+                  sessionStorage.setItem(STORAGE_WORKSPACE_VIEW, newView);
+                } catch {}
+                if (typeof window !== 'undefined' && window.location.hash !== `#${newView}`) {
+                  window.history.pushState({ view: newView }, '', `#${newView}`);
+                }
+              }}
+              currentUser={currentUser}
+            />
+          )}
+
+        {effectiveView === 'overview' && currentUser.role !== 'soc_analyst' && AuthorizationService.isViewAuthorized(currentUser.role, 'overview') && (
           <AnalystOverviewDashboard
             alerts={alerts}
             tactics={tactics}
             techniques={techniques}
+            currentUser={currentUser}
             onNavigateToQueue={() => setWorkspaceView('alerts')}
             onSelectAlertForInvestigation={(alert) => {
               setSelectedAlert(alert);
@@ -744,11 +1173,18 @@ function AppContent() {
               setSelectedAlert(a);
               setWorkspaceView('investigations');
             }}
-            onRefresh={loadData}
-            isLoading={isLoading}
+            onRefresh={handleRetryAlerts}
+            isLoading={isAlertsLoading}
             selectedAlertId={selectedAlert?.id}
             currentUser={currentUser}
             onUpdateAlertStatus={handleUpdateAlertStatus}
+            error={alertsError}
+            recommendations={recommendations}
+            onReviewRecommendation={handleReviewRecommendation}
+            onValidateRecommendation={handleValidateRecommendation}
+            onRefreshRecommendations={() => fetchRecommendations(true)}
+            onSimulateAlert={handleSimulateAlert}
+            techniques={techniques}
           />
         )}
 
@@ -780,6 +1216,10 @@ function AppContent() {
               }
               setWorkspaceView('playbooks');
             }}
+            tasks={tasks}
+            currentUser={currentUser}
+            onCreateTask={handleCreateTask}
+            onReviewTask={handleReviewTask}
           />
         )}
 
@@ -827,6 +1267,21 @@ function AppContent() {
           />
         )}
 
+        {effectiveView === 'seceng_overview' && AuthorizationService.isViewAuthorized(currentUser.role, 'seceng_overview') && (
+          <SecurityEngineerOverviewPage
+            currentUser={currentUser}
+            onNavigateToTab={(tab) => {
+              if (tab === 'threat_intel' || tab === 'mitre' || tab === 'workbench') {
+                setWorkspaceView('mitre');
+              } else if (tab === 'alerts') {
+                setWorkspaceView('alerts');
+              } else if (tab === 'audit') {
+                setWorkspaceView('audit');
+              }
+            }}
+          />
+        )}
+
         {effectiveView === 'mitre' && AuthorizationService.isViewAuthorized(currentUser.role, 'mitre') && (
           <SecurityEngineerDashboard
             tactics={tactics}
@@ -835,6 +1290,12 @@ function AppContent() {
             coverage={coverage}
             isLoading={isLoading}
             onRefresh={loadData}
+            currentUser={currentUser}
+            activeRecommendations={recommendations}
+            onSubmitRecommendation={handleCreateRecommendation}
+            onUpdateRecommendationImplementation={handleUpdateRecommendationImplementation}
+            onRefreshRecommendations={() => fetchRecommendations(true)}
+            onSimulateAlert={handleSimulateAlert}
           />
         )}
 
@@ -850,15 +1311,21 @@ function AppContent() {
             onInspectAlert={handleInspectAlert}
             currentRole={currentUser.role}
             currentUser={currentUser}
+            isLoading={isTasksLoading}
+            error={tasksError}
+            onRetry={handleRetryTasks}
           />
         )}
 
-        {effectiveView === 'network' && AuthorizationService.isViewAuthorized(currentUser.role, 'network') && (
-          <NetworkFlowViewer />
-        )}
-
         {effectiveView === 'audit' && AuthorizationService.isViewAuthorized(currentUser.role, 'audit') && (
-          <AuditLogViewer logs={auditLogs} initialAlertFilter={auditFilterAlertId} currentUser={currentUser} />
+          <AuditLogViewer
+            logs={auditLogs}
+            initialAlertFilter={auditFilterAlertId}
+            currentUser={currentUser}
+            isLoading={isAuditLoading}
+            error={auditError}
+            onRetry={handleRetryAudit}
+          />
         )}
 
         {/* Deep-dive Investigation Drawer */}
@@ -870,12 +1337,15 @@ function AppContent() {
             onAddNote={handleAddAnalystNote}
             mitreTechnique={selectedMitreTechnique}
             mitigations={selectedMitreMitigations}
-            networkFlow={selectedNetworkFlow}
             triageRecommendation={selectedTriageRecommendation}
             currentRole={currentUser.role}
+            currentUser={currentUser}
             onInitiateSimulatedAction={(action, target) =>
               handleInitiateSimulatedAction(action, target, selectedAlert.id)
             }
+            tasks={tasks}
+            onCreateTask={handleCreateTask}
+            onReviewTask={handleReviewTask}
           />
         )}
 

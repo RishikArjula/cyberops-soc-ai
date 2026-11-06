@@ -14,6 +14,7 @@ import { AuditLogEntry, IncidentTask, ResponseActionType } from '../../types/aud
 import { UserProfile, UserRole, AccessDeniedError } from '../../types/auth';
 import { AuthorizationService } from '../../services/authorizationService';
 import { getSupabaseClient } from '../../lib/supabaseClient';
+import { formatApprovalNotes, formatReworkNotes, getTaskReviewState } from '../../utils/remediationReview';
 
 function mapRowToAuditLogEntry(row: any): AuditLogEntry {
   return {
@@ -81,10 +82,13 @@ export class SupabaseAuditLogRepository implements IAuditLogRepository {
     user: UserProfile,
     entry: Omit<AuditLogEntry, 'id' | 'timestamp' | 'isSimulated' | 'actorName' | 'actorRole'>
   ): Promise<AuditLogEntry> {
+    const isRecommendationAction = entry.actionType.startsWith('recommendation_');
+    const isAuthorizedRecommendationRole = user.role === 'security_engineer' || user.role === 'soc_analyst';
+
     const canAuthorize = AuthorizationService.canAuthorizeSimulatedActions(user.role);
     const canPropose = AuthorizationService.canProposeActions(user.role);
 
-    if (!canAuthorize && !canPropose) {
+    if (!canAuthorize && !canPropose && !(isRecommendationAction && isAuthorizedRecommendationRole)) {
       throw new AccessDeniedError(
         `Access Denied: Role "${user.role}" is not authorized to execute or propose response actions.`,
         'action:authorize_simulated',
@@ -186,6 +190,36 @@ export class SupabaseAuditLogRepository implements IAuditLogRepository {
       throw new Error(`[SupabaseAuditLogRepository] Failed to update task ${taskId}: ${error.message}`);
     }
 
+    if (status === 'in_progress') {
+      try {
+        const { data: existingStarted } = await client
+          .from('audit_logs')
+          .select('id')
+          .eq('action_type', 'remediation_started')
+          .like('system_note', `%task ${taskId}%`)
+          .limit(1);
+
+        if (!existingStarted || existingStarted.length === 0) {
+          const auditPayload = {
+            audit_category: 'operational',
+            actor_id: user.id.startsWith('usr-') ? null : user.id,
+            actor_name: user.name,
+            actor_role: user.role,
+            action_type: 'remediation_started',
+            target_resource: data.target_asset || `Task ${taskId}`,
+            justification: `Remediation procedure initiated by operator for task ${taskId}.`,
+            status: 'SIMULATED_SUCCESS',
+            associated_alert_id: data.associated_alert_id || null,
+            is_simulated: true,
+            system_note: `Remediation started for task ${taskId} by ${user.name} (${user.role}).`,
+          };
+          await client.from('audit_logs').insert(auditPayload);
+        }
+      } catch (startErr) {
+        console.warn('[SupabaseAuditLogRepository] Non-fatal: failed to record remediation_started audit log:', startErr);
+      }
+    }
+
     if (status === 'completed') {
       try {
         // Check for existing audit log for this task to avoid duplicates on retry
@@ -197,6 +231,7 @@ export class SupabaseAuditLogRepository implements IAuditLogRepository {
           .limit(1);
 
         if (!existingAudits || existingAudits.length === 0) {
+          const isSimVerification = notes?.includes('Controlled Simulation') || notes?.toLowerCase().includes('simulation verification');
           const auditPayload = {
             audit_category: 'operational',
             actor_id: user.id.startsWith('usr-') ? null : user.id,
@@ -208,7 +243,9 @@ export class SupabaseAuditLogRepository implements IAuditLogRepository {
             status: 'SIMULATED_SUCCESS',
             associated_alert_id: data.associated_alert_id || null,
             is_simulated: true,
-            system_note: `Remediation verification confirmed for task ${taskId}. Operator attestation and checklist verified.`,
+            system_note: isSimVerification
+              ? `Controlled simulation verification confirmed for task ${taskId}. Synthetic telemetry reviewed with zero live endpoint changes.`
+              : `Remediation verification confirmed for task ${taskId}. Operator attestation and checklist verified.`,
           };
 
           const { error: auditError } = await client
@@ -234,12 +271,138 @@ export class SupabaseAuditLogRepository implements IAuditLogRepository {
   }
 
   /**
+   * Reviews an IT Operations remediation task (Approve or Request Rework).
+   * Restricted strictly to SOC Analysts.
+   */
+  async reviewRemediationTask(
+    user: UserProfile,
+    taskId: string,
+    decision: 'approved' | 'rework_requested',
+    notes: string
+  ): Promise<IncidentTask> {
+    if (user.role !== 'soc_analyst') {
+      throw new AccessDeniedError(
+        `Access Denied: Role "${user.role}" is not authorized to review remediation tasks. Only SOC Analysts can review and approve remediation.`,
+        'incident:update',
+        user.role
+      );
+    }
+
+    const client = getSupabaseClient();
+    const { data: currentTaskData, error: fetchErr } = await client
+      .from('incident_tasks')
+      .select('*')
+      .eq('id', taskId)
+      .single();
+
+    if (fetchErr || !currentTaskData) {
+      throw new Error(`[SupabaseAuditLogRepository] Task ${taskId} not found: ${fetchErr?.message || 'Unknown error'}`);
+    }
+
+    const currentTask = mapRowToIncidentTask(currentTaskData);
+
+    // Must be in completed status to be reviewed
+    if (currentTask.status !== 'completed') {
+      throw new Error(`Task ${taskId} is currently "${currentTask.status}". Only completed remediation tasks can be reviewed.`);
+    }
+
+    // Verify current review state: cannot review if already approved
+    const reviewState = getTaskReviewState(currentTask);
+    if (reviewState.status === 'approved') {
+      throw new Error(`Task ${taskId} has already been approved by a SOC Analyst. Duplicate review decisions are prevented.`);
+    }
+
+    // Validate inputs
+    const trimmedNotes = (notes || '').trim();
+    if (decision === 'rework_requested') {
+      if (trimmedNotes.length < 10) {
+        throw new Error('Mandatory rework instructions must be at least 10 characters long describing the corrective action required.');
+      }
+    }
+
+    let newStatus: IncidentTask['status'];
+    let updatedNotes: string;
+    let actionType: 'remediation_approved' | 'remediation_rework_requested';
+    let justification: string;
+
+    if (decision === 'approved') {
+      newStatus = 'completed'; // Keep task status as completed
+      updatedNotes = formatApprovalNotes(currentTask.completionNotes, user, trimmedNotes);
+      actionType = 'remediation_approved';
+      justification = trimmedNotes || 'Remediation verification and technical evidence validated and approved by SOC Analyst.';
+    } else {
+      newStatus = 'in_progress'; // Change task status from completed to in_progress
+      updatedNotes = formatReworkNotes(currentTask.completionNotes, user, trimmedNotes);
+      actionType = 'remediation_rework_requested';
+      justification = trimmedNotes;
+    }
+
+    const { data: updatedData, error: updateErr } = await client
+      .from('incident_tasks')
+      .update({
+        status: newStatus,
+        completion_notes: updatedNotes,
+      })
+      .eq('id', taskId)
+      .select('*')
+      .single();
+
+    if (updateErr || !updatedData) {
+      throw new Error(`[SupabaseAuditLogRepository] Failed to review task ${taskId}: ${updateErr?.message}`);
+    }
+
+    // Insert operational audit log
+    const auditPayload = {
+      audit_category: 'operational',
+      actor_id: user.id.startsWith('usr-') ? null : user.id,
+      actor_name: user.name,
+      actor_role: user.role,
+      action_type: actionType,
+      target_resource: currentTask.targetAsset || `Task ${taskId}`,
+      justification,
+      status: 'SIMULATED_SUCCESS',
+      associated_alert_id: currentTask.associatedAlertId || null,
+      is_simulated: true,
+      system_note: `SOC Analyst remediation review decision (${decision.toUpperCase()}) recorded for task ${taskId}. Reviewer: ${user.name} (${user.callsign || user.role}).`,
+    };
+
+    const { error: auditError } = await client.from('audit_logs').insert(auditPayload);
+    if (auditError) {
+      console.error('[SupabaseAuditLogRepository] Failed to record review audit log:', auditError);
+      throw new Error(`[SupabaseAuditLogRepository] Task reviewed but audit log recording failed: ${auditError.message}`);
+    }
+
+    return mapRowToIncidentTask(updatedData);
+  }
+
+  /**
    * Creates a remediation task with a unique task sequence ID.
    */
   async createTask(
     user: UserProfile,
     task: Omit<IncidentTask, 'id' | 'createdAt'>
   ): Promise<IncidentTask> {
+    if (user.role !== 'soc_analyst') {
+      throw new AccessDeniedError(
+        `Access Denied: Role "${user.role}" is not authorized to create incident response tasks. Only SOC Analysts can create tasks.`,
+        'alert:escalate',
+        user.role
+      );
+    }
+
+    if (!task.title?.trim()) {
+      throw new Error('Task title is required.');
+    }
+    if (!task.description?.trim()) {
+      throw new Error('Task description and remediation instructions are required.');
+    }
+    if (!task.targetAsset?.trim()) {
+      throw new Error('Target asset is required.');
+    }
+    if (!task.associatedAlertId?.trim()) {
+      throw new Error('Associated alert ID is required.');
+    }
+
     const client = getSupabaseClient();
 
     // Query recent tasks to calculate next sequential candidate ID
@@ -288,6 +451,26 @@ export class SupabaseAuditLogRepository implements IAuditLogRepository {
 
     if (error) {
       throw new Error(`[SupabaseAuditLogRepository] Failed to create incident task: ${error.message}`);
+    }
+
+    // Insert operational audit log for task creation
+    try {
+      const auditPayload = {
+        audit_category: 'operational',
+        actor_id: user.id.startsWith('usr-') ? null : user.id,
+        actor_name: user.name,
+        actor_role: user.role,
+        action_type: 'task_created',
+        target_resource: data.target_asset || `Task ${candidate}`,
+        justification: task.description,
+        status: 'SIMULATED_SUCCESS',
+        associated_alert_id: data.associated_alert_id || null,
+        is_simulated: true,
+        system_note: `Incident response task ${candidate} created by ${user.name} and assigned to ${task.assignedRole}.`,
+      };
+      await client.from('audit_logs').insert(auditPayload);
+    } catch (auditErr) {
+      console.warn('[SupabaseAuditLogRepository] Non-fatal: failed to record task_created audit log:', auditErr);
     }
 
     return mapRowToIncidentTask(data);

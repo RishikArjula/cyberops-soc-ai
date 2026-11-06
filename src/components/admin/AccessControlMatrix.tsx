@@ -68,12 +68,6 @@ export const ALL_WORKSPACE_VIEWS: WorkspaceViewDefinition[] = [
     description: 'Authorized operational containment tasks and remediation tracking.',
   },
   {
-    id: 'network',
-    name: 'Network Flow Telemetry',
-    category: 'Operations',
-    description: 'CIC-IDS2017 structured flow inspection and traffic anomaly analysis.',
-  },
-  {
     id: 'audit',
     name: 'Compliance & Audit Trail',
     category: 'Governance',
@@ -183,14 +177,6 @@ export const ALL_PERMISSIONS: PermissionDefinition[] = [
     name: 'Analyze Defensive Coverage',
     category: 'Threat Engineering',
     description: 'Evaluate detection rule posture and compute ATT&CK coverage gaps.',
-  },
-
-  // Telemetry
-  {
-    id: 'telemetry:read',
-    name: 'Read Network Telemetry',
-    category: 'Telemetry',
-    description: 'Query raw and aggregated CIC-IDS2017 network flow records.',
   },
 
   // Audit & Compliance

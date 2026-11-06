@@ -28,6 +28,7 @@ import { UserProfile } from '../types/auth';
 import { LocalAlertRepository } from '../repositories/local/LocalAlertRepository';
 import { LocalAuditLogRepository } from '../repositories/local/LocalAuditLogRepository';
 import { LocalMITRERepository } from '../repositories/local/LocalMITRERepository';
+import { LocalDetectionRecommendationRepository } from '../repositories/local/LocalDetectionRecommendationRepository';
 import { RepositoryBundle } from '../repositories';
 import { sendCopilotMessage, fetchCopilotStatus, CopilotClientError } from '../services/copilotClientService';
 
@@ -83,6 +84,7 @@ const testRepos: RepositoryBundle = {
   alertRepo: new LocalAlertRepository(),
   auditRepo: new LocalAuditLogRepository(),
   mitreRepo: new LocalMITRERepository(),
+  recommendationRepo: new LocalDetectionRecommendationRepository(),
   isLive: false,
   mode: 'development_demo',
 };

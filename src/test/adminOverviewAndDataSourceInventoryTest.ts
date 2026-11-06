@@ -25,7 +25,6 @@ import {
   DatabaseConnectivityStatus,
 } from '../services/adminMetricsService';
 import { AUTHENTIC_MITRE_TACTICS, AUTHENTIC_MITRE_TECHNIQUES, AUTHENTIC_MITRE_MITIGATIONS } from '../data/mitreData';
-import { SAMPLE_NETWORK_FLOWS } from '../data/networkFlows';
 
 let totalTests = 0;
 let passedTests = 0;
@@ -218,9 +217,9 @@ export async function runAdminOverviewAndDataSourceInventoryTests(): Promise<{ p
     userCount: 6,
   });
 
-  assert(inventory.length === 5, 'Inventory contains exactly 5 cataloged data sources');
+  assert(inventory.length === 4, 'Inventory contains exactly 4 cataloged data sources');
 
-  const [dbItem, mitreItem, cicIdsItem, auditItem, copilotItem] = inventory;
+  const [dbItem, mitreItem, auditItem, copilotItem] = inventory;
 
   // 4.1 Primary Database
   assert(dbItem.id === 'primary_database', 'First item is primary_database');
@@ -248,30 +247,15 @@ export async function runAdminOverviewAndDataSourceInventoryTests(): Promise<{ p
   );
   assert(mitreItem.isOperationalData === false, 'MITRE item does not expose operational data');
 
-  // 4.3 CIC-IDS2017 Telemetry
-  assert(cicIdsItem.id === 'cic_ids_telemetry', 'Third item is cic_ids_telemetry');
-  assert(cicIdsItem.type === 'telemetry_benchmark', 'CIC-IDS type is telemetry_benchmark');
-  assert(cicIdsItem.provenanceType === 'cic_ids_sample', 'CIC-IDS provenance badge is cic_ids_sample');
-  assert(cicIdsItem.state === 'Synthetic Benchmark', 'CIC-IDS state is Synthetic Benchmark');
-  assert(
-    cicIdsItem.recordCountLabel.includes(`${SAMPLE_NETWORK_FLOWS.length} Flow Records`),
-    'CIC-IDS record count matches SAMPLE_NETWORK_FLOWS (4 flows)'
-  );
-  assert(
-    cicIdsItem.stateDetail.includes('Synthetic demonstration flows'),
-    'CIC-IDS stateDetail clearly informs it is not live packet capture'
-  );
-  assert(cicIdsItem.isOperationalData === false, 'CIC-IDS item does not expose private incidents');
-
-  // 4.4 Audit Ledger
-  assert(auditItem.id === 'audit_ledger', 'Fourth item is audit_ledger');
+  // 4.3 Audit Ledger
+  assert(auditItem.id === 'audit_ledger', 'Third item is audit_ledger');
   assert(auditItem.type === 'audit_ledger', 'Audit item type is audit_ledger');
   assert(auditItem.state === 'Active (Append-Only)', 'Audit state is Active (Append-Only)');
   assert(auditItem.scopeNotice.includes('SHA-256'), 'Audit scope notice documents cryptographic SHA-256 hash chaining');
   assert(auditItem.isOperationalData === false, 'Audit item respects domain isolation');
 
-  // 4.5 AI Copilot Advisory
-  assert(copilotItem.id === 'copilot_engine', 'Fifth item is copilot_engine');
+  // 4.4 AI Copilot Advisory
+  assert(copilotItem.id === 'copilot_engine', 'Fourth item is copilot_engine');
   assert(copilotItem.type === 'ai_copilot', 'Copilot type is ai_copilot');
   assert(copilotItem.state === 'Configured', 'Copilot state is Configured');
   assert(
@@ -301,7 +285,7 @@ export async function runAdminOverviewAndDataSourceInventoryTests(): Promise<{ p
   });
 
   assert(localInventory[0].state === 'Local Demo', 'Primary DB correctly catalogs as Local Demo when unconfigured');
-  assert(localInventory[4].state === 'Standby', 'Copilot correctly catalogs as Standby without live API key');
+  assert(localInventory[3].state === 'Standby', 'Copilot correctly catalogs as Standby without live API key');
 
   // =========================================================================
   // 6. OPERATIONAL DATA ISOLATION VERIFICATION

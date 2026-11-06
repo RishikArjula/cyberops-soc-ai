@@ -154,12 +154,196 @@ export function getSupabaseConfigurationStatus(overrides?: SupabaseEnvOverrides)
   };
 }
 
+// ==============================================================================
+// Scoped Storage Management for Remember Me Support
+// ==============================================================================
+
+export type StorageMode = 'local' | 'session';
+
+export const STORAGE_MODE_KEY = 'cyberops_soc_auth_mode';
+export const AUTH_STORAGE_KEY = 'ai_soc_auth_session_v1';
+
+/**
+ * Evaluates the current storage mode preference ('local' | 'session').
+ * Defaults to 'local' for backward compatibility unless explicitly set to 'session'.
+ */
+export function getStorageMode(): StorageMode {
+  if (typeof window === 'undefined') return 'local';
+  try {
+    const sessionVal = window.sessionStorage?.getItem(STORAGE_MODE_KEY);
+    if (sessionVal === 'session') return 'session';
+    if (sessionVal === 'local') return 'local';
+    const localVal = window.localStorage?.getItem(STORAGE_MODE_KEY);
+    if (localVal === 'session') return 'session';
+    if (localVal === 'local') return 'local';
+  } catch {
+    // In restricted sandbox environments
+  }
+  return 'local';
+}
+
+/**
+ * Sets the active storage mode.
+ * Crucially, when switching to 'session' mode, this immediately purges any stale
+ * persistent tokens from localStorage so previous sessions cannot inadvertently resurrect.
+ */
+export function setStorageMode(mode: StorageMode): void {
+  if (typeof window === 'undefined') return;
+  try {
+    if (mode === 'session') {
+      window.sessionStorage?.setItem(STORAGE_MODE_KEY, 'session');
+      window.localStorage?.removeItem(STORAGE_MODE_KEY);
+
+      // Actively purge any persistent Supabase auth tokens and demo personas from localStorage
+      if (window.localStorage) {
+        for (let i = window.localStorage.length - 1; i >= 0; i--) {
+          const key = window.localStorage.key(i);
+          if (key && (key.startsWith('sb-') || key.includes('supabase.auth.token') || key === AUTH_STORAGE_KEY)) {
+            window.localStorage.removeItem(key);
+          }
+        }
+      }
+    } else {
+      window.localStorage?.setItem(STORAGE_MODE_KEY, 'local');
+      window.sessionStorage?.removeItem(STORAGE_MODE_KEY);
+    }
+  } catch {
+    // Ignore storage restrictions
+  }
+}
+
+/**
+ * Safely migrates active authentication tokens between storage tiers when switching Remember Me
+ * while a session is already active.
+ * - When transitioning to 'session': copies tokens from localStorage into sessionStorage, then purges localStorage.
+ * - When transitioning to 'local': copies tokens from sessionStorage into localStorage, then purges sessionStorage.
+ * This guarantees the active Supabase in-memory session, reload restoration, and subsequent auto-refreshes
+ * remain continuous and synchronized without leaving stale or conflicting persistent tokens.
+ */
+export function migrateStorageMode(targetMode: StorageMode): void {
+  if (typeof window === 'undefined') return;
+  try {
+    const currentMode = getStorageMode();
+    if (currentMode === targetMode) return;
+
+    const fromStorage = currentMode === 'local' ? window.localStorage : window.sessionStorage;
+    const toStorage = targetMode === 'local' ? window.localStorage : window.sessionStorage;
+
+    if (fromStorage && toStorage) {
+      const keysToMigrate: string[] = [];
+      for (let i = 0; i < fromStorage.length; i++) {
+        const key = fromStorage.key(i);
+        if (key && (key.startsWith('sb-') || key.includes('supabase.auth.token') || key === AUTH_STORAGE_KEY)) {
+          keysToMigrate.push(key);
+        }
+      }
+
+      for (const key of keysToMigrate) {
+        const val = fromStorage.getItem(key);
+        if (val !== null) {
+          toStorage.setItem(key, val);
+        }
+        fromStorage.removeItem(key);
+      }
+    }
+
+    setStorageMode(targetMode);
+  } catch {
+    // Ignore storage restrictions
+  }
+}
+
+/**
+ * Clears all authentication storage across both sessionStorage and localStorage.
+ */
+export function clearAllAuthStorage(): void {
+  if (typeof window === 'undefined') return;
+  try {
+    window.sessionStorage?.removeItem(STORAGE_MODE_KEY);
+    window.localStorage?.removeItem(STORAGE_MODE_KEY);
+    window.sessionStorage?.removeItem(AUTH_STORAGE_KEY);
+    window.localStorage?.removeItem(AUTH_STORAGE_KEY);
+
+    if (window.sessionStorage) {
+      for (let i = window.sessionStorage.length - 1; i >= 0; i--) {
+        const key = window.sessionStorage.key(i);
+        if (key && (key.startsWith('sb-') || key.includes('supabase.auth.token'))) {
+          window.sessionStorage.removeItem(key);
+        }
+      }
+    }
+
+    if (window.localStorage) {
+      for (let i = window.localStorage.length - 1; i >= 0; i--) {
+        const key = window.localStorage.key(i);
+        if (key && (key.startsWith('sb-') || key.includes('supabase.auth.token'))) {
+          window.localStorage.removeItem(key);
+        }
+      }
+    }
+  } catch {
+    // Ignore storage restrictions
+  }
+}
+
+/**
+ * Scoped storage adapter conforming to Supabase's SupportedStorage contract.
+ * - When in 'local' mode: Reads/writes from localStorage (persists across restarts).
+ * - When in 'session' mode: Reads/writes from sessionStorage (scoped to the browser session lifecycle).
+ *   Defensively purges any stale key from localStorage if encountered in session mode.
+ * - When removing: Purges from both storages cleanly.
+ */
+export const scopedAuthStorageAdapter = {
+  getItem: (key: string): string | null => {
+    if (typeof window === 'undefined') return null;
+    try {
+      const mode = getStorageMode();
+      if (mode === 'session') {
+        const item = window.sessionStorage?.getItem(key) ?? null;
+        // Defensively wipe residual localStorage item if present in session mode
+        if (window.localStorage?.getItem(key) !== null) {
+          window.localStorage?.removeItem(key);
+        }
+        return item;
+      }
+      return window.localStorage?.getItem(key) ?? null;
+    } catch {
+      return null;
+    }
+  },
+  setItem: (key: string, value: string): void => {
+    if (typeof window === 'undefined') return;
+    try {
+      const mode = getStorageMode();
+      if (mode === 'session') {
+        window.sessionStorage?.setItem(key, value);
+        window.localStorage?.removeItem(key);
+      } else {
+        window.localStorage?.setItem(key, value);
+        window.sessionStorage?.removeItem(key);
+      }
+    } catch {
+      // Ignore storage restrictions
+    }
+  },
+  removeItem: (key: string): void => {
+    if (typeof window === 'undefined') return;
+    try {
+      window.sessionStorage?.removeItem(key);
+      window.localStorage?.removeItem(key);
+    } catch {
+      // Ignore storage restrictions
+    }
+  },
+};
+
 // Client initialization
 let clientInstance: SupabaseClient | null = null;
 
 if (isSupabaseConfigured()) {
   clientInstance = createClient(supabaseUrl!, supabaseKey!, {
     auth: {
+      storage: scopedAuthStorageAdapter,
       persistSession: true,
       autoRefreshToken: true,
       detectSessionInUrl: true,

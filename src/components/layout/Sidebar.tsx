@@ -10,7 +10,7 @@ import {
 } from 'lucide-react';
 import { UserRole, ROLE_METADATA } from '../../types/auth';
 
-export type NavView = 'alerts' | 'mitre' | 'tasks' | 'audit' | 'network';
+export type NavView = 'alerts' | 'mitre' | 'tasks' | 'audit';
 
 interface SidebarProps {
   currentView: NavView;
@@ -59,12 +59,6 @@ export const Sidebar: React.FC<SidebarProps> = ({
       icon: <ClipboardList className="w-4 h-4 text-amber-400" />,
       badgeCount: taskCount,
       recommendedFor: 'it_operations',
-    },
-    {
-      id: 'network',
-      label: 'Network Flow Telemetry',
-      description: 'CIC-IDS2017 structured network flow analysis',
-      icon: <Activity className="w-4 h-4 text-emerald-400" />,
     },
     {
       id: 'audit',

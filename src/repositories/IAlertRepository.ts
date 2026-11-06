@@ -27,8 +27,14 @@ export interface IAlertRepository {
 
   /**
    * Updates an alert's status. Requires 'alert:triage' permission.
+   * Enforces Incident Closure Guard if status is 'resolved'.
    */
-  updateAlertStatus(user: UserProfile, id: string, status: AlertStatus): Promise<SecurityAlert>;
+  updateAlertStatus(
+    user: UserProfile,
+    id: string,
+    status: AlertStatus,
+    tasks?: import('../types/audit').IncidentTask[]
+  ): Promise<SecurityAlert>;
 
   /**
    * Appends an analyst investigation note. Requires 'alert:add_note' permission.
@@ -39,4 +45,9 @@ export interface IAlertRepository {
    * Resets local prototype records to clean baseline.
    */
   resetToDefault(): Promise<void>;
+
+  /**
+   * Inserts or updates a controlled simulated alert into the operational queue.
+   */
+  addSimulatedAlert?(alert: SecurityAlert): Promise<SecurityAlert>;
 }

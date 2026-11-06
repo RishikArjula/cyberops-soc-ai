@@ -73,7 +73,6 @@ export async function runAccessControlMatrixTests(): Promise<{
     'mitre:analyze_coverage',
     'action:propose',
     'action:authorize_simulated',
-    'telemetry:read',
     'audit:read',
     'audit:export',
     'platform:admin',
@@ -87,7 +86,6 @@ export async function runAccessControlMatrixTests(): Promise<{
     'playbooks',
     'mitre',
     'tasks',
-    'network',
     'audit',
     'profile',
     'admin',
@@ -96,17 +94,17 @@ export async function runAccessControlMatrixTests(): Promise<{
   // -------------------------------------------------------------------------
   // 1. Permission Completeness & Deduplication
   // -------------------------------------------------------------------------
-  test('ALL_PERMISSIONS contains exactly 17 permissions', () => {
+  test('ALL_PERMISSIONS contains exactly 16 permissions', () => {
     assert(
-      ALL_PERMISSIONS.length === 17,
-      `Expected 17 permissions in ALL_PERMISSIONS, found ${ALL_PERMISSIONS.length}`
+      ALL_PERMISSIONS.length === 16,
+      `Expected 16 permissions in ALL_PERMISSIONS, found ${ALL_PERMISSIONS.length}`
     );
   });
 
-  test('All 17 canonical Permission types are present without duplicates', () => {
+  test('All 16 canonical Permission types are present without duplicates', () => {
     const presentIds = new Set(ALL_PERMISSIONS.map((p) => p.id));
     assert(
-      presentIds.size === 17,
+      presentIds.size === 16,
       `Duplicate permission IDs found: ${ALL_PERMISSIONS.length} vs ${presentIds.size} unique`
     );
 
@@ -129,17 +127,17 @@ export async function runAccessControlMatrixTests(): Promise<{
   // -------------------------------------------------------------------------
   // 2. Workspace View Completeness & Alignment
   // -------------------------------------------------------------------------
-  test('ALL_WORKSPACE_VIEWS contains exactly 10 views', () => {
+  test('ALL_WORKSPACE_VIEWS contains exactly 9 views', () => {
     assert(
-      ALL_WORKSPACE_VIEWS.length === 10,
-      `Expected 10 views in ALL_WORKSPACE_VIEWS, found ${ALL_WORKSPACE_VIEWS.length}`
+      ALL_WORKSPACE_VIEWS.length === 9,
+      `Expected 9 views in ALL_WORKSPACE_VIEWS, found ${ALL_WORKSPACE_VIEWS.length}`
     );
   });
 
-  test('All 10 expected workspace views are present without duplicates', () => {
+  test('All 9 expected workspace views are present without duplicates', () => {
     const presentViews = new Set(ALL_WORKSPACE_VIEWS.map((v) => v.id));
     assert(
-      presentViews.size === 10,
+      presentViews.size === 9,
       `Duplicate view IDs found: ${ALL_WORKSPACE_VIEWS.length} vs ${presentViews.size} unique`
     );
 
@@ -176,34 +174,36 @@ export async function runAccessControlMatrixTests(): Promise<{
     }
   });
 
-  test('SOC Analyst is authorized for exactly 7 views', () => {
+  test('SOC Analyst is authorized for exactly 7 views (6 knowledge modules + profile)', () => {
     const analystViews = AuthorizationService.ROLE_AUTHORIZED_VIEWS.soc_analyst;
     assert(analystViews.length === 7, `Expected 7 views for soc_analyst, found ${analystViews.length}`);
     assert(analystViews.includes('overview'), 'SOC Analyst must access overview');
-    assert(analystViews.includes('alerts'), 'SOC Analyst must access alerts');
-    assert(analystViews.includes('investigations'), 'SOC Analyst must access investigations');
-    assert(analystViews.includes('playbooks'), 'SOC Analyst must access playbooks');
-    assert(analystViews.includes('network'), 'SOC Analyst must access network');
-    assert(analystViews.includes('audit'), 'SOC Analyst must access audit');
+    assert(analystViews.includes('strategies'), 'SOC Analyst must access strategies');
+    assert(analystViews.includes('analytics'), 'SOC Analyst must access analytics');
+    assert(analystViews.includes('log_sources'), 'SOC Analyst must access log_sources');
+    assert(analystViews.includes('data_components'), 'SOC Analyst must access data_components');
+    assert(analystViews.includes('mitre_explorer'), 'SOC Analyst must access mitre_explorer');
     assert(analystViews.includes('profile'), 'SOC Analyst must access profile');
   });
 
-  test('Security Engineer is authorized for exactly 5 views', () => {
+  test('Security Engineer is authorized for exactly 5 views (4 workspace modules + profile)', () => {
     const engineerViews = AuthorizationService.ROLE_AUTHORIZED_VIEWS.security_engineer;
     assert(engineerViews.length === 5, `Expected 5 views for security_engineer, found ${engineerViews.length}`);
+    assert(engineerViews.includes('seceng_overview'), 'Security Engineer must access seceng_overview');
     assert(engineerViews.includes('mitre'), 'Security Engineer must access mitre');
     assert(engineerViews.includes('alerts'), 'Security Engineer must access alerts');
-    assert(engineerViews.includes('network'), 'Security Engineer must access network');
     assert(engineerViews.includes('audit'), 'Security Engineer must access audit');
     assert(engineerViews.includes('profile'), 'Security Engineer must access profile');
   });
 
-  test('IT Operations is authorized for exactly 5 views', () => {
+  test('IT Operations is authorized for exactly 7 views (6 workspace modules + profile)', () => {
     const itopsViews = AuthorizationService.ROLE_AUTHORIZED_VIEWS.it_operations;
-    assert(itopsViews.length === 5, `Expected 5 views for it_operations, found ${itopsViews.length}`);
+    assert(itopsViews.length === 7, `Expected 7 views for it_operations, found ${itopsViews.length}`);
+    assert(itopsViews.includes('itops_overview'), 'IT Operations must access itops_overview');
+    assert(itopsViews.includes('itops_techniques'), 'IT Operations must access itops_techniques');
+    assert(itopsViews.includes('itops_mitigations'), 'IT Operations must access itops_mitigations');
     assert(itopsViews.includes('tasks'), 'IT Operations must access tasks');
     assert(itopsViews.includes('alerts'), 'IT Operations must access alerts');
-    assert(itopsViews.includes('network'), 'IT Operations must access network');
     assert(itopsViews.includes('audit'), 'IT Operations must access audit');
     assert(itopsViews.includes('profile'), 'IT Operations must access profile');
   });
@@ -221,8 +221,8 @@ export async function runAccessControlMatrixTests(): Promise<{
   // -------------------------------------------------------------------------
   test('ROLE_DEFAULT_VIEW mapping is correct for all 4 roles', () => {
     assert(AuthorizationService.ROLE_DEFAULT_VIEW.soc_analyst === 'overview', 'soc_analyst default must be overview');
-    assert(AuthorizationService.ROLE_DEFAULT_VIEW.security_engineer === 'mitre', 'security_engineer default must be mitre');
-    assert(AuthorizationService.ROLE_DEFAULT_VIEW.it_operations === 'tasks', 'it_operations default must be tasks');
+    assert(AuthorizationService.ROLE_DEFAULT_VIEW.security_engineer === 'seceng_overview', 'security_engineer default must be seceng_overview');
+    assert(AuthorizationService.ROLE_DEFAULT_VIEW.it_operations === 'itops_overview', 'it_operations default must be itops_overview');
     assert(AuthorizationService.ROLE_DEFAULT_VIEW.super_admin === 'admin', 'super_admin default must be admin');
   });
 
@@ -290,7 +290,7 @@ export async function runAccessControlMatrixTests(): Promise<{
   });
 
   test('Super Admin has zero network telemetry permissions', () => {
-    assert(!AuthorizationService.hasPermission('super_admin', 'telemetry:read'), 'Super Admin cannot have telemetry:read');
+    assert(!AuthorizationService.hasPermission('super_admin', 'telemetry:read' as any), 'Super Admin cannot have telemetry:read');
   });
 
   test('Super Admin has exactly 4 administrative and governance permissions', () => {

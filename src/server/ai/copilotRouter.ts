@@ -15,6 +15,7 @@ import { CopilotContextAssembler } from './copilotContextAssembler';
 import {
   GeminiCopilotService,
   GeminiUnavailableError,
+  GeminiRateLimitError,
   GeminiTimeoutError,
 } from './geminiClient';
 import {
@@ -188,7 +189,16 @@ export function createCopilotRouter(options: CopilotRouterOptions = {}): Router 
         assembled.assembledContent
       );
 
-      // 6. Record server-calculated token usage
+      // 6. Validate that generated advisory text is non-empty
+      if (!generationResult.text || generationResult.text.trim().length === 0) {
+        res.status(502).json({
+          error: 'The AI Copilot model returned an empty advisory response. Please retry your query.',
+          code: 'EMPTY_MODEL_RESPONSE',
+        });
+        return;
+      }
+
+      // Record server-calculated token usage
       const promptTokens = InMemoryUsageController.estimateTokens(
         assembled.systemInstruction + assembled.assembledContent
       );
@@ -198,6 +208,7 @@ export function createCopilotRouter(options: CopilotRouterOptions = {}): Router 
       // 7. Return structured safe response envelope
       const responsePayload: CopilotChatResponse = {
         response: generationResult.text,
+        text: generationResult.text,
         role: user.role,
         contextType,
         entityId,
@@ -217,10 +228,21 @@ export function createCopilotRouter(options: CopilotRouterOptions = {}): Router 
         return;
       }
 
+      if (err instanceof GeminiRateLimitError) {
+        if (err.retryAfterSeconds) {
+          res.setHeader('Retry-After', err.retryAfterSeconds);
+        }
+        res.status(429).json({
+          error: err.message,
+          code: err.code || 'RATE_LIMIT_EXCEEDED',
+        });
+        return;
+      }
+
       if (err instanceof GeminiUnavailableError) {
         res.status(503).json({
           error: err.message,
-          code: 'COPILOT_UNAVAILABLE',
+          code: err.code || 'COPILOT_UNAVAILABLE',
         });
         return;
       }
@@ -228,13 +250,58 @@ export function createCopilotRouter(options: CopilotRouterOptions = {}): Router 
       if (err instanceof GeminiTimeoutError) {
         res.status(504).json({
           error: err.message,
+          code: err.code || 'MODEL_TIMEOUT',
+        });
+        return;
+      }
+
+      const message = err instanceof Error ? err.message : String(err);
+
+      // Defense-in-depth: Classify upstream provider status codes and error substrings
+      if (
+        message.includes('503') ||
+        message.includes('UNAVAILABLE') ||
+        message.includes('high demand') ||
+        message.includes('overloaded')
+      ) {
+        res.status(503).json({
+          error: 'AI Copilot service is temporarily unavailable: The upstream model is experiencing high demand. Please retry shortly.',
+          code: 'COPILOT_UNAVAILABLE',
+        });
+        return;
+      }
+
+      if (
+        message.includes('429') ||
+        message.includes('RESOURCE_EXHAUSTED') ||
+        message.includes('rate limit') ||
+        message.includes('Too Many Requests')
+      ) {
+        res.status(429).json({
+          error: 'AI Copilot service rate limit or quota exceeded. Please wait a moment before sending another query.',
+          code: 'RATE_LIMIT_EXCEEDED',
+        });
+        return;
+      }
+
+      if (
+        message.includes('504') ||
+        message.includes('DEADLINE_EXCEEDED') ||
+        message.includes('timeout')
+      ) {
+        res.status(504).json({
+          error: 'Gemini model request timed out after 30 seconds.',
           code: 'MODEL_TIMEOUT',
         });
         return;
       }
 
-      const message = err instanceof Error ? err.message : 'Unknown internal error';
-      console.error('[CyberOps SOC Copilot Error]:', message);
+      // Sanitize logged message to prevent credential or secret leaks
+      const sanitized = message
+        .replace(/key=[A-Za-z0-9_-]+/g, 'key=[REDACTED]')
+        .replace(/AIza[0-9A-Za-z-_]{35}/g, '[REDACTED_API_KEY]');
+      console.error('[CyberOps SOC Copilot Error]:', sanitized);
+
       res.status(500).json({
         error: 'An internal error occurred while processing the AI Copilot request.',
         code: 'INTERNAL_COPILOT_ERROR',

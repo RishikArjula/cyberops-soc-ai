@@ -12,9 +12,12 @@
 
 import { IAlertRepository } from '../IAlertRepository';
 import { SecurityAlert, AlertFilterOptions, AlertStatus } from '../../types/alert';
+import { IncidentTask } from '../../types/audit';
 import { UserProfile, AccessDeniedError } from '../../types/auth';
 import { AuthorizationService } from '../../services/authorizationService';
 import { INITIAL_SYNTHETIC_ALERTS } from '../../data/syntheticAlerts';
+import { normalizeAttackId } from '../../utils/mitreUtils';
+import { checkAlertClosureEligibility } from '../../utils/remediationReview';
 
 const STORAGE_KEY = 'ai_soc_alerts_v1';
 
@@ -22,19 +25,26 @@ export class LocalAlertRepository implements IAlertRepository {
   private memoryStore: SecurityAlert[] | null = null;
 
   private getStorageData(): SecurityAlert[] {
+    let rawAlerts: SecurityAlert[] | null = null;
     if (typeof window !== 'undefined' && window.localStorage) {
       try {
         const stored = window.localStorage.getItem(STORAGE_KEY);
         if (stored) {
-          return JSON.parse(stored);
+          rawAlerts = JSON.parse(stored);
         }
       } catch {
         // Fallback
       }
     }
-    if (this.memoryStore) return this.memoryStore;
-    this.memoryStore = [...INITIAL_SYNTHETIC_ALERTS];
-    this.saveStorageData(this.memoryStore);
+    if (!rawAlerts) {
+      if (this.memoryStore) return this.memoryStore;
+      rawAlerts = [...INITIAL_SYNTHETIC_ALERTS];
+    }
+    const normalized = rawAlerts.map((a) => ({
+      ...a,
+      attack_id: a.attack_id || normalizeAttackId(a.mitreTechniqueId) || undefined,
+    }));
+    this.memoryStore = normalized;
     return this.memoryStore;
   }
 
@@ -145,8 +155,14 @@ export class LocalAlertRepository implements IAlertRepository {
 
   /**
    * Updates alert triage status. Throws AccessDeniedError if user lacks 'alert:triage'.
+   * Enforces Incident Closure Guard: blocks transition to 'resolved' if any linked remediation tasks are unapproved.
    */
-  async updateAlertStatus(user: UserProfile, id: string, status: AlertStatus): Promise<SecurityAlert> {
+  async updateAlertStatus(
+    user: UserProfile,
+    id: string,
+    status: AlertStatus,
+    tasks?: IncidentTask[]
+  ): Promise<SecurityAlert> {
     // Assert authorization
     AuthorizationService.assertPermission(user, 'alert:triage');
 
@@ -154,6 +170,26 @@ export class LocalAlertRepository implements IAlertRepository {
     const index = list.findIndex((a) => a.id === id);
     if (index === -1) {
       throw new Error(`Alert ${id} not found`);
+    }
+
+    // Incident Closure Guard: prevent resolution if associated remediation tasks are not all approved
+    if (status === 'resolved') {
+      let taskList: IncidentTask[] = tasks || [];
+      if (!tasks && typeof window !== 'undefined' && window.localStorage) {
+        try {
+          const stored = window.localStorage.getItem('ai_soc_tasks_v1');
+          if (stored) {
+            taskList = JSON.parse(stored);
+          }
+        } catch {}
+      }
+      const eligibility = checkAlertClosureEligibility(id, taskList);
+      if (!eligibility.eligible) {
+        throw new Error(
+          eligibility.reason ||
+            `Cannot resolve alert ${id}: all associated remediation tasks must have explicit SOC Analyst approval before closure.`
+        );
+      }
     }
 
     const updated: SecurityAlert = {
@@ -187,6 +223,30 @@ export class LocalAlertRepository implements IAlertRepository {
     list[index] = updated;
     this.saveStorageData(list);
     return updated;
+  }
+
+  /**
+   * Appends or updates a controlled simulated alert with duplicate prevention.
+   */
+  async addSimulatedAlert(alert: SecurityAlert): Promise<SecurityAlert> {
+    const list = this.getStorageData();
+    const existingIndex = list.findIndex((a) => a.id === alert.id);
+
+    if (existingIndex >= 0) {
+      // Update existing alert timestamp and preserve triage status if updated
+      const updated = {
+        ...list[existingIndex],
+        detectedAt: alert.detectedAt,
+        evidence: alert.evidence,
+      };
+      list[existingIndex] = updated;
+      this.saveStorageData(list);
+      return updated;
+    }
+
+    const updatedList = [alert, ...list];
+    this.saveStorageData(updatedList);
+    return alert;
   }
 
   async resetToDefault(): Promise<void> {

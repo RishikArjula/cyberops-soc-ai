@@ -23,18 +23,30 @@ import {
   ExternalLink,
   Code,
   Tag,
+  Play,
+  Activity,
 } from 'lucide-react';
+import {
+  SimulatedDetectionEngine,
+  SimulationEvaluationResult,
+} from '../../services/simulatedDetectionEngine';
+import { SecurityAlert } from '../../types/alert';
+import { ProvenanceBadge } from '../common/ProvenanceBadge';
 
 interface DetectionWorkbenchViewProps {
   techniques: MitreTechnique[];
   tactics: MitreTactic[];
   initialSelectedTechnique?: MitreTechnique | null;
+  onDispatchSimulatedAlert?: (alert: SecurityAlert) => Promise<void>;
+  userRole?: string;
 }
 
 export const DetectionWorkbenchView: React.FC<DetectionWorkbenchViewProps> = ({
   techniques,
   tactics,
   initialSelectedTechnique,
+  onDispatchSimulatedAlert,
+  userRole = 'security_engineer',
 }) => {
   // Load session drafts or generate initial baseline
   const [drafts, setDrafts] = useState<DetectionRuleDraft[]>(() => {
@@ -43,12 +55,24 @@ export const DetectionWorkbenchView: React.FC<DetectionWorkbenchViewProps> = ({
     return DetectionRuleService.getInitialStarterDrafts(techniques, tactics);
   });
 
+  const [simulationResult, setSimulationResult] = useState<SimulationEvaluationResult | null>(null);
+  const [simulationStatus, setSimulationStatus] = useState<'idle' | 'local_preview' | 'persisted' | 'failed'>('idle');
+  const [simulationError, setSimulationError] = useState<string | null>(null);
+  const [isSimulating, setIsSimulating] = useState(false);
+
   const [selectedDraftId, setSelectedDraftId] = useState<string>(() => {
     return drafts.length > 0 ? drafts[0].id : '';
   });
 
   const [copied, setCopied] = useState(false);
-  const [feedback, setFeedback] = useState<{ type: 'success' | 'warning'; message: string } | null>(null);
+  const [feedback, setFeedback] = useState<{ type: 'success' | 'warning' | 'info'; message: string } | null>(null);
+
+  // Reset simulation result when draft selection changes
+  useEffect(() => {
+    setSimulationResult(null);
+    setSimulationStatus('idle');
+    setSimulationError(null);
+  }, [selectedDraftId]);
 
   // Save to session storage whenever drafts mutate
   useEffect(() => {
@@ -78,6 +102,7 @@ export const DetectionWorkbenchView: React.FC<DetectionWorkbenchViewProps> = ({
   }, [initialSelectedTechnique]);
 
   const activeDraft = drafts.find((d) => d.id === selectedDraftId) || (drafts.length > 0 ? drafts[0] : null);
+  const activeSimEvent = activeDraft ? SimulatedDetectionEngine.getSimulatedEventForTechnique(activeDraft.techniqueId) : null;
 
   // Structural syntax validation result
   const validation: RuleValidationResult = activeDraft
@@ -155,6 +180,99 @@ export const DetectionWorkbenchView: React.FC<DetectionWorkbenchViewProps> = ({
     }
   };
 
+  const handleRunSimulation = async () => {
+    if (!activeDraft) return;
+
+    // Role boundary assertion
+    if (userRole !== 'security_engineer' && userRole !== 'soc_analyst') {
+      setFeedback({
+        type: 'warning',
+        message: `Role "${userRole}" is not authorized to run controlled event detection simulations.`,
+      });
+      return;
+    }
+
+    setIsSimulating(true);
+    setSimulationError(null);
+
+    try {
+      // 1. Resolve controlled simulated event matching the active draft's technique
+      const targetEvent = SimulatedDetectionEngine.getSimulatedEventForTechnique(activeDraft.techniqueId);
+
+      if (!targetEvent) {
+        setSimulationResult({
+          matched: false,
+          ruleId: activeDraft.id,
+          techniqueId: activeDraft.techniqueId,
+          evaluatedAt: new Date().toISOString(),
+          matchedConditions: [],
+          unmatchedConditions: [
+            `No controlled simulation telemetry available for technique "${activeDraft.techniqueId}". The controlled pipeline currently supports T1047 (WMI), T1053.005 (Scheduled Task), and T1486 (Data Encrypted for Impact).`,
+          ],
+          rationale: `Simulation halted: Controlled telemetry scenario is not defined for technique ${activeDraft.techniqueId}. Select or draft a rule for T1047, T1053.005, or T1486 to simulate.`,
+        });
+        setSimulationStatus('idle');
+        setFeedback({
+          type: 'info',
+          message: `Controlled simulation is available for T1047, T1053.005, and T1486. Select or draft a rule for one of these techniques to test.`,
+        });
+        return;
+      }
+
+      // 2. Execute dynamic rule evaluation against the technique-specific event
+      const result = SimulatedDetectionEngine.evaluateAgainstDraft(activeDraft, targetEvent);
+      setSimulationResult(result);
+
+      if (result.matched && result.simulatedAlert) {
+        if (userRole === 'security_engineer') {
+          // Security Engineer: Generate local preview without attempting unauthorized database insert
+          setSimulationStatus('local_preview');
+          setSimulationError(null);
+          setFeedback({
+            type: 'info',
+            message: `Controlled Simulation: Rule matched! Generated local simulation preview for "${result.simulatedAlert.id}". Security Engineers cannot directly create operational alerts.`,
+          });
+        } else if (userRole === 'soc_analyst') {
+          // SOC Analyst: Require dispatch handler to exist and await successful persistence
+          if (!onDispatchSimulatedAlert) {
+            const errorMsg = 'Dispatch handler unavailable: cannot persist alert to database.';
+            setSimulationStatus('failed');
+            setSimulationError(errorMsg);
+            setFeedback({
+              type: 'warning',
+              message: `Alert persistence failed: ${errorMsg}`,
+            });
+            return;
+          }
+
+          await onDispatchSimulatedAlert(result.simulatedAlert);
+          setSimulationStatus('persisted');
+          setSimulationError(null);
+          setFeedback({
+            type: 'success',
+            message: `Controlled Simulation: Rule matched! Alert "${result.simulatedAlert.id}" successfully persisted to database and dispatched to Alert Triage Queue.`,
+          });
+        }
+      } else {
+        setSimulationStatus('idle');
+        setFeedback({
+          type: 'warning',
+          message: `Controlled Simulation: No match. The draft rule conditions do not match the simulated Windows telemetry for ${activeDraft.techniqueId}.`,
+        });
+      }
+    } catch (err: any) {
+      const errorMsg = err?.message || 'Database insert failed.';
+      setSimulationStatus('failed');
+      setSimulationError(errorMsg);
+      setFeedback({
+        type: 'warning',
+        message: `Alert persistence failed: ${errorMsg}`,
+      });
+    } finally {
+      setIsSimulating(false);
+    }
+  };
+
   return (
     <div className="space-y-4">
       {/* Workbench Header & Security Policy Notice */}
@@ -226,6 +344,8 @@ export const DetectionWorkbenchView: React.FC<DetectionWorkbenchViewProps> = ({
           className={`p-2.5 rounded border text-xs flex items-center justify-between gap-2 ${
             feedback.type === 'success'
               ? 'bg-emerald-950/60 border-emerald-800 text-emerald-200'
+              : feedback.type === 'info'
+              ? 'bg-cyan-950/60 border-cyan-800 text-cyan-200'
               : 'bg-amber-950/60 border-amber-800 text-amber-200'
           }`}
         >
@@ -353,6 +473,19 @@ export const DetectionWorkbenchView: React.FC<DetectionWorkbenchViewProps> = ({
                     <option value="low">Severity: Low</option>
                   </select>
 
+                  {/* Controlled Event Pipeline Simulation Trigger */}
+                  <Button
+                    size="xs"
+                    variant={activeSimEvent ? 'primary' : 'outline'}
+                    onClick={handleRunSimulation}
+                    disabled={isSimulating}
+                    className="font-mono text-xs flex items-center gap-1.5"
+                    title={`Simulate controlled Windows process-creation event for ${activeDraft.techniqueId} against this rule`}
+                  >
+                    <Play className={`w-3.5 h-3.5 ${isSimulating ? 'animate-spin' : 'text-amber-400'}`} />
+                    {isSimulating ? 'Evaluating...' : 'Simulate Windows Event'}
+                  </Button>
+
                   <Button
                     size="xs"
                     variant="outline"
@@ -426,6 +559,141 @@ export const DetectionWorkbenchView: React.FC<DetectionWorkbenchViewProps> = ({
                       <li key={i}>{warn}</li>
                     ))}
                   </ul>
+                )}
+              </div>
+
+              {/* Controlled Event Pipeline Simulation Panel */}
+              <div className="p-3 bg-slate-950 border border-slate-800 rounded-lg space-y-2.5 text-xs">
+                <div className="flex items-center justify-between flex-wrap gap-2">
+                  <div className="flex items-center gap-2">
+                    <ProvenanceBadge type="controlled_simulation" label="CONTROLLED SIMULATION PIPELINE" />
+                    <span className="font-mono text-xs font-semibold text-slate-200">
+                      {activeDraft.techniqueId}: {activeDraft.techniqueName}
+                    </span>
+                  </div>
+                  {activeSimEvent ? (
+                    <span className="text-[10px] font-mono text-slate-400">
+                      Host: <strong className="text-cyan-400">{activeSimEvent.host}</strong> | Event ID: <strong className="text-cyan-400">{activeSimEvent.eventId}</strong>
+                    </span>
+                  ) : (
+                    <span className="text-[10px] font-mono text-amber-400">
+                      Scenarios available: T1047, T1053.005, T1486
+                    </span>
+                  )}
+                </div>
+
+                {/* Event Telemetry Summary */}
+                {activeSimEvent ? (
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-[11px] font-mono bg-slate-900/80 p-2.5 rounded border border-slate-800/80">
+                    <div>
+                      <span className="text-slate-400 text-[10px] block">IMAGE (Process)</span>
+                      <span className="text-emerald-400 break-all">{activeSimEvent.image}</span>
+                    </div>
+                    <div>
+                      <span className="text-slate-400 text-[10px] block">COMMAND LINE</span>
+                      <span className="text-amber-300 break-all">{activeSimEvent.commandLine}</span>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="p-2.5 bg-slate-900/80 border border-slate-800/80 rounded text-[11px] text-slate-400 font-mono">
+                    No controlled telemetry scenario mapped for {activeDraft.techniqueId}. Select or generate a draft for <strong>T1047 (WMI)</strong>, <strong>T1053.005 (Scheduled Task)</strong>, or <strong>T1486 (Data Encrypted for Impact)</strong> to simulate.
+                  </div>
+                )}
+
+                {/* Evaluation State Display */}
+                {simulationResult ? (
+                  <div
+                    className={`p-2.5 rounded border text-xs space-y-1.5 font-mono ${
+                      simulationResult.matched
+                        ? 'bg-emerald-950/40 border-emerald-800 text-emerald-200'
+                        : 'bg-rose-950/40 border-rose-800 text-rose-200'
+                    }`}
+                  >
+                    <div className="flex items-center justify-between font-bold">
+                      <span className="flex items-center gap-1.5">
+                        {simulationResult.matched ? (
+                          <>
+                            <CheckCircle2 className="w-4 h-4 text-emerald-400" />
+                            <span>RULE EVALUATION MATCHED (High-Severity Alert Generated)</span>
+                          </>
+                        ) : (
+                          <>
+                            <AlertTriangle className="w-4 h-4 text-rose-400" />
+                            <span>RULE EVALUATION MISMATCH (No Alert Generated)</span>
+                          </>
+                        )}
+                      </span>
+                      <span className="text-[10px] text-slate-400">
+                        {new Date(simulationResult.evaluatedAt).toLocaleTimeString()}
+                      </span>
+                    </div>
+
+                    <p className="text-[11px] text-slate-300">{simulationResult.rationale}</p>
+
+                    {simulationResult.matchedConditions.length > 0 && (
+                      <div className="pt-1 border-t border-slate-800/60">
+                        <span className="text-[10px] text-emerald-400 uppercase font-bold block">Matched Conditions:</span>
+                        <ul className="list-disc list-inside text-[10px] text-slate-300 space-y-0.5">
+                          {simulationResult.matchedConditions.map((c, idx) => (
+                            <li key={idx}>{c}</li>
+                          ))}
+                        </ul>
+                      </div>
+                    )}
+
+                    {simulationResult.unmatchedConditions.length > 0 && (
+                      <div className="pt-1 border-t border-slate-800/60">
+                        <span className="text-[10px] text-rose-400 uppercase font-bold block">Unmatched Conditions:</span>
+                        <ul className="list-disc list-inside text-[10px] text-slate-300 space-y-0.5">
+                          {simulationResult.unmatchedConditions.map((c, idx) => (
+                            <li key={idx}>{c}</li>
+                          ))}
+                        </ul>
+                      </div>
+                    )}
+
+                    {simulationResult.simulatedAlert && (
+                      <div className="mt-2 p-2.5 bg-slate-900 border border-slate-700/80 rounded space-y-2 text-xs">
+                        <div className="flex items-center justify-between flex-wrap gap-2">
+                          <div className="flex items-center gap-2">
+                            <span className="font-bold text-amber-400 font-mono">{simulationResult.simulatedAlert.id}</span>
+                            <span className="text-slate-300 text-[11px] truncate max-w-xs">{simulationResult.simulatedAlert.title}</span>
+                          </div>
+                          {simulationStatus === 'local_preview' && (
+                            <span className="text-[10px] font-bold text-amber-400 px-2 py-0.5 rounded bg-amber-950/80 border border-amber-800">
+                              SIMULATED — LOCAL PREVIEW
+                            </span>
+                          )}
+                          {simulationStatus === 'persisted' && (
+                            <span className="text-[10px] font-bold text-emerald-400 px-2 py-0.5 rounded bg-emerald-950/80 border border-emerald-800">
+                              PERSISTED TO QUEUE
+                            </span>
+                          )}
+                          {simulationStatus === 'failed' && (
+                            <span className="text-[10px] font-bold text-rose-400 px-2 py-0.5 rounded bg-rose-950/80 border border-rose-800">
+                              PERSISTENCE FAILED
+                            </span>
+                          )}
+                        </div>
+
+                        {simulationStatus === 'local_preview' && (
+                          <div className="text-[10px] text-amber-200/90 bg-amber-950/40 p-2 rounded border border-amber-900/50 leading-relaxed">
+                            <strong>Security Engineer Notice:</strong> Rule matched successfully in local preview. Under SOC security architecture, Security Engineers have read-only access to operational alerts and cannot directly create operational alerts. Submit this draft as an <strong>Improvement Recommendation</strong> for SOC Analyst review.
+                          </div>
+                        )}
+
+                        {simulationStatus === 'failed' && simulationError && (
+                          <div className="text-[10px] text-rose-300 bg-rose-950/40 p-2 rounded border border-rose-900/50 leading-relaxed">
+                            <strong>Alert Persistence Failed:</strong> {simulationError}
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                ) : (
+                  <div className="flex items-center justify-between text-[11px] text-slate-400 pt-1">
+                    <span>Click <strong>"Simulate Windows Event"</strong> to evaluate the current Sigma draft rule conditions against this controlled telemetry event.</span>
+                  </div>
                 )}
               </div>
 

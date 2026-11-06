@@ -20,10 +20,16 @@
 
 import { createServer } from '../../server.ts';
 import { UserProfile, UserRole } from '../types/auth';
-import { GeminiUnavailableError } from '../server/ai/geminiClient';
+import {
+  GeminiUnavailableError,
+  GeminiRateLimitError,
+  GeminiCopilotService,
+  extractGeneratedText,
+} from '../server/ai/geminiClient';
 import { LocalAlertRepository } from '../repositories/local/LocalAlertRepository';
 import { LocalAuditLogRepository } from '../repositories/local/LocalAuditLogRepository';
 import { LocalMITRERepository } from '../repositories/local/LocalMITRERepository';
+import { LocalDetectionRecommendationRepository } from '../repositories/local/LocalDetectionRecommendationRepository';
 import { RepositoryBundle } from '../repositories';
 
 const TEST_PORT = 3197;
@@ -122,6 +128,7 @@ const testRepos: RepositoryBundle = {
   alertRepo: new LocalAlertRepository(),
   auditRepo: new LocalAuditLogRepository(),
   mitreRepo: new LocalMITRERepository(),
+  recommendationRepo: new LocalDetectionRecommendationRepository(),
   isLive: false,
   mode: 'development_demo',
 };
@@ -1415,6 +1422,263 @@ async function runCopilotBackendTests() {
       }
     } finally {
       restoreTestEnv();
+    }
+
+    // -------------------------------------------------------------------------
+    // Test Group 16: Upstream Gemini 503/429/Timeout Classification & Redaction
+    // -------------------------------------------------------------------------
+    console.log('\n-- Group 16: Upstream Gemini 503/429/Timeout Classification & Redaction --');
+
+    // Scenario 1: Upstream 503 High Demand returned by model generator
+    const upstream503Server = await createServer({
+      copilotOptions: {
+        tokenVerifier: testTokenVerifier,
+        geminiService: {
+          isConfigured: () => true,
+          generateAdvisory: async () => {
+            throw new GeminiUnavailableError(
+              'AI Copilot service is temporarily unavailable: The upstream model is experiencing high demand. Please retry shortly.'
+            );
+          },
+        } as any,
+        repositoryBundle: testRepos,
+      },
+    });
+
+    const PORT_503 = 3195;
+    await new Promise<void>((resolve, reject) => {
+      upstream503Server.httpServer.listen(PORT_503, '0.0.0.0', () => resolve());
+      upstream503Server.httpServer.on('error', reject);
+    });
+
+    try {
+      const res503 = await fetch(`http://127.0.0.1:${PORT_503}/api/copilot/chat`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: 'Bearer analyst_approved',
+        },
+        body: JSON.stringify({ prompt: 'Recommend priority escalation', contextType: 'alert_triage' }),
+      });
+
+      assert(res503.status === 503, 'Test 162: Upstream 503 UNAVAILABLE returns HTTP 503 (not HTTP 500)');
+      const body503 = await res503.json() as { code?: string; error?: string };
+      assert(body503.code === 'COPILOT_UNAVAILABLE', 'Test 163: Error code is COPILOT_UNAVAILABLE (not INTERNAL_COPILOT_ERROR)');
+      assert(
+        Boolean(body503.error?.includes('high demand') || body503.error?.includes('temporarily unavailable')),
+        'Test 164: Safe, informative message returned explaining upstream capacity without stack traces'
+      );
+    } finally {
+      await upstream503Server.close();
+    }
+
+    // Scenario 2: Upstream 429 Rate Limit / Quota Exceeded
+    const upstream429Server = await createServer({
+      copilotOptions: {
+        tokenVerifier: testTokenVerifier,
+        geminiService: {
+          isConfigured: () => true,
+          generateAdvisory: async () => {
+            throw new GeminiRateLimitError('AI Copilot service rate limit or quota exceeded.', 15);
+          },
+        } as any,
+        repositoryBundle: testRepos,
+      },
+    });
+
+    const PORT_429 = 3194;
+    await new Promise<void>((resolve, reject) => {
+      upstream429Server.httpServer.listen(PORT_429, '0.0.0.0', () => resolve());
+      upstream429Server.httpServer.on('error', reject);
+    });
+
+    try {
+      const res429 = await fetch(`http://127.0.0.1:${PORT_429}/api/copilot/chat`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: 'Bearer analyst_approved',
+        },
+        body: JSON.stringify({ prompt: 'Analyze threat', contextType: 'general_soc' }),
+      });
+
+      assert(res429.status === 429, 'Test 165: Upstream 429 returns HTTP 429 (not HTTP 500)');
+      const body429 = await res429.json() as { code?: string; error?: string };
+      assert(body429.code === 'RATE_LIMIT_EXCEEDED', 'Test 166: Error code is RATE_LIMIT_EXCEEDED');
+      assert(res429.headers.get('Retry-After') === '15', 'Test 167: Retry-After header is propagated');
+    } finally {
+      await upstream429Server.close();
+    }
+
+    // Scenario 3: GeminiCopilotService classifier transforms raw provider 503 error into GeminiUnavailableError
+    const raw503Service = new GeminiCopilotService(
+      { apiKey: 'mock_key' },
+      async () => {
+        throw new Error('503 UNAVAILABLE: This model is currently experiencing high demand. Please try again later.');
+      }
+    );
+
+    let caughtAsUnavailable = false;
+    try {
+      await raw503Service.generateAdvisory('system', 'prompt');
+    } catch (err: unknown) {
+      if (err instanceof GeminiUnavailableError && err.status === 503) {
+        caughtAsUnavailable = true;
+      }
+    }
+    assert(caughtAsUnavailable === true, 'Test 168: GeminiCopilotService maps raw 503 UNAVAILABLE to typed GeminiUnavailableError');
+
+    // Scenario 4: GeminiCopilotService redacts API keys and sensitive tokens from error messages
+    const secretLeakingService = new GeminiCopilotService(
+      { apiKey: 'mock_key' },
+      async () => {
+        throw new Error('Failed to connect with key=AIzaSyD_TEST_KEY_1234567890abcdefgh and postgresql://admin:secretPass123@db.supabase.co');
+      }
+    );
+
+    let errorRedacted = false;
+    try {
+      await secretLeakingService.generateAdvisory('system', 'prompt');
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : '';
+      if (!msg.includes('AIzaSyD') && !msg.includes('secretPass123') && msg.includes('[REDACTED')) {
+        errorRedacted = true;
+      }
+    }
+    assert(errorRedacted === true, 'Test 169: GeminiCopilotService redacts API keys and passwords from error messages');
+
+    // -------------------------------------------------------------------------
+    // Test Group 17: Extraction Robustness & Empty Response Prevention
+    // -------------------------------------------------------------------------
+    console.log('\n-- Group 17: Extraction Robustness & Empty Response Prevention --');
+
+    // Scenario 1: extractGeneratedText retrieves from .text getter
+    const mockResponse1 = { text: 'Direct getter text content.' };
+    assert(
+      extractGeneratedText(mockResponse1) === 'Direct getter text content.',
+      'Test 170: extractGeneratedText retrieves text from .text property getter'
+    );
+
+    // Scenario 2: extractGeneratedText retrieves from candidate parts and skips thoughts
+    const mockResponse2 = {
+      text: undefined,
+      candidates: [
+        {
+          content: {
+            parts: [
+              { text: 'Internal thinking scratchpad', thought: true },
+              { text: 'Final actionable advisory text for analyst.' },
+            ],
+          },
+        },
+      ],
+    };
+    assert(
+      extractGeneratedText(mockResponse2) === 'Final actionable advisory text for analyst.',
+      'Test 171: extractGeneratedText skips thought blocks and extracts true advisory text'
+    );
+
+    // Scenario 3: extractGeneratedText returns empty string when response is empty
+    assert(
+      extractGeneratedText(null) === '' && extractGeneratedText({}) === '',
+      'Test 172: extractGeneratedText safely returns empty string on null/empty response'
+    );
+
+    // Scenario 4: Empty model response is rejected with HTTP 502 (NOT HTTP 200 with blank text)
+    const emptyModelServer = await createServer({
+      copilotOptions: {
+        tokenVerifier: testTokenVerifier,
+        geminiService: {
+          isConfigured: () => true,
+          generateAdvisory: async () => {
+            return {
+              text: '   ', // whitespace only
+              model: 'gemini-3.8-flash',
+              disclaimer: 'Advisory disclaimer',
+            };
+          },
+        } as any,
+        repositoryBundle: testRepos,
+      },
+    });
+
+    const PORT_EMPTY = 3193;
+    await new Promise<void>((resolve, reject) => {
+      emptyModelServer.httpServer.listen(PORT_EMPTY, '0.0.0.0', () => resolve());
+      emptyModelServer.httpServer.on('error', reject);
+    });
+
+    try {
+      const resEmpty = await fetch(`http://127.0.0.1:${PORT_EMPTY}/api/copilot/chat`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: 'Bearer analyst_approved',
+        },
+        body: JSON.stringify({
+          prompt: 'Provide a structured triage checklist for investigating suspicious encoded PowerShell activity.',
+          contextType: 'general_soc',
+        }),
+      });
+
+      assert(resEmpty.status === 502, 'Test 173: Empty/whitespace model output returns HTTP 502 (not HTTP 200)');
+      const emptyBody = await resEmpty.json() as { code?: string; error?: string };
+      assert(emptyBody.code === 'EMPTY_MODEL_RESPONSE', 'Test 174: Error code is EMPTY_MODEL_RESPONSE');
+      assert(
+        Boolean(emptyBody.error?.includes('empty advisory response')),
+        'Test 175: Informative error message returned preventing blank advisory container in UI'
+      );
+    } finally {
+      await emptyModelServer.close();
+    }
+
+    // Scenario 5: Valid response provides both .response and .text for complete client contract compatibility
+    const contractServer = await createServer({
+      copilotOptions: {
+        tokenVerifier: testTokenVerifier,
+        geminiService: {
+          isConfigured: () => true,
+          generateAdvisory: async () => ({
+            text: 'Valid triage checklist: 1. Decode base64 2. Check process ancestry',
+            model: 'gemini-3.8-flash',
+            disclaimer: 'Advisory disclaimer',
+          }),
+        } as any,
+        repositoryBundle: testRepos,
+      },
+    });
+
+    const PORT_CONTRACT = 3192;
+    await new Promise<void>((resolve, reject) => {
+      contractServer.httpServer.listen(PORT_CONTRACT, '0.0.0.0', () => resolve());
+      contractServer.httpServer.on('error', reject);
+    });
+
+    try {
+      const resContract = await fetch(`http://127.0.0.1:${PORT_CONTRACT}/api/copilot/chat`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: 'Bearer analyst_approved',
+        },
+        body: JSON.stringify({
+          prompt: 'Provide triage checklist',
+          contextType: 'general_soc',
+        }),
+      });
+
+      assert(resContract.status === 200, 'Test 176: Valid generation returns HTTP 200');
+      const contractBody = await resContract.json() as { response?: string; text?: string };
+      assert(
+        contractBody.response === 'Valid triage checklist: 1. Decode base64 2. Check process ancestry',
+        'Test 177: response field contains expected generated advisory'
+      );
+      assert(
+        contractBody.text === contractBody.response,
+        'Test 178: text alias field matches response field for client contract compatibility'
+      );
+    } finally {
+      await contractServer.close();
     }
 
   } catch (err) {

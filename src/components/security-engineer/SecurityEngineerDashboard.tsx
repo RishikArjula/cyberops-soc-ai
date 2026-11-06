@@ -1,5 +1,13 @@
-import React, { useState, useMemo, useEffect } from 'react';
+import React, { useState, useMemo, useEffect, useCallback } from 'react';
 import { MitreTactic, MitreTechnique, MitreMitigation, MitreDefenseCoverage } from '../../types/mitre';
+import { SecurityAlert } from '../../types/alert';
+import { UserProfile } from '../../types/auth';
+import {
+  fetchSecurityEngineerKnowledge,
+  SecurityEngineerKnowledgeRecord,
+} from '../../services/knowledgeService';
+import { lookupSecurityEngineerKnowledgeForTechnique } from '../../services/relationshipService';
+import { formatAttackIdDisplay } from '../../utils/mitreUtils';
 import { ProvenanceBadge } from '../common/ProvenanceBadge';
 import { Button } from '../common/Button';
 import { DetectionWorkbenchView } from './DetectionWorkbenchView';
@@ -10,6 +18,7 @@ import {
   generateImprovementRecommendations,
 } from '../../services/securityAnalyticsService';
 import { DetectionRuleService, DetectionRuleDraft } from '../../services/detectionRuleService';
+import { DetectionRecommendation, CreateRecommendationInput } from '../../types/recommendation';
 import {
   Layers,
   ShieldCheck,
@@ -51,6 +60,17 @@ interface SecurityEngineerDashboardProps {
   coverage: MitreDefenseCoverage[];
   isLoading?: boolean;
   onRefresh?: () => void;
+  currentUser?: UserProfile;
+  activeRecommendations?: DetectionRecommendation[];
+  onSubmitRecommendation?: (input: CreateRecommendationInput) => Promise<void>;
+  onUpdateRecommendationImplementation?: (
+    recommendationId: string,
+    status: 'in_progress' | 'completed',
+    notes?: string,
+    sigmaDraftReference?: string
+  ) => Promise<void>;
+  onRefreshRecommendations?: () => void;
+  onSimulateAlert?: (alert: SecurityAlert) => Promise<void>;
 }
 
 export type SecurityEngineerViewMode = 'matrix' | 'list' | 'workbench' | 'analytics' | 'recommendations';
@@ -62,6 +82,12 @@ export const SecurityEngineerDashboard: React.FC<SecurityEngineerDashboardProps>
   coverage,
   isLoading = false,
   onRefresh,
+  currentUser,
+  activeRecommendations = [],
+  onSubmitRecommendation,
+  onUpdateRecommendationImplementation,
+  onRefreshRecommendations,
+  onSimulateAlert,
 }) => {
   const [selectedTacticId, setSelectedTacticId] = useState<string>('all');
   const [selectedCoverageFilter, setSelectedCoverageFilter] = useState<string>('all');
@@ -70,6 +96,64 @@ export const SecurityEngineerDashboard: React.FC<SecurityEngineerDashboardProps>
     return techniques.length > 0 ? techniques[0] : null;
   });
   const [viewMode, setViewMode] = useState<SecurityEngineerViewMode>('matrix');
+
+  // Security Engineer Knowledge Base (public.security_engineer_knowledge) state for Defense Inspector
+  const [knowledgeRecords, setKnowledgeRecords] = useState<SecurityEngineerKnowledgeRecord[]>([]);
+  const [isLoadingKnowledge, setIsLoadingKnowledge] = useState<boolean>(false);
+  const [knowledgeError, setKnowledgeError] = useState<string | null>(null);
+
+  const loadKnowledge = useCallback(async () => {
+    if (!currentUser) return;
+    setIsLoadingKnowledge(true);
+    setKnowledgeError(null);
+    try {
+      const records = await fetchSecurityEngineerKnowledge(currentUser);
+      setKnowledgeRecords(records);
+    } catch (err) {
+      setKnowledgeError(
+        err instanceof Error ? err.message : 'Failed to query Security Engineer reference knowledge.'
+      );
+      setKnowledgeRecords([]);
+    } finally {
+      setIsLoadingKnowledge(false);
+    }
+  }, [currentUser]);
+
+  useEffect(() => {
+    let isMounted = true;
+
+    async function initialFetch() {
+      if (!currentUser) return;
+      setIsLoadingKnowledge(true);
+      setKnowledgeError(null);
+      try {
+        const records = await fetchSecurityEngineerKnowledge(currentUser);
+        if (!isMounted) return;
+        setKnowledgeRecords(records);
+      } catch (err) {
+        if (!isMounted) return;
+        setKnowledgeError(
+          err instanceof Error ? err.message : 'Failed to query Security Engineer reference knowledge.'
+        );
+        setKnowledgeRecords([]);
+      } finally {
+        if (isMounted) {
+          setIsLoadingKnowledge(false);
+        }
+      }
+    }
+
+    initialFetch();
+
+    return () => {
+      isMounted = false;
+    };
+  }, [currentUser]);
+
+  const secEngKnowledgeLookup = useMemo(() => {
+    if (!selectedTechnique?.id || knowledgeRecords.length === 0) return null;
+    return lookupSecurityEngineerKnowledgeForTechnique(selectedTechnique.id, knowledgeRecords);
+  }, [selectedTechnique, knowledgeRecords]);
 
   // Load session drafts to derive analytics and rule inventory
   const [drafts, setDrafts] = useState<DetectionRuleDraft[]>(() => {
@@ -558,6 +642,8 @@ export const SecurityEngineerDashboard: React.FC<SecurityEngineerDashboardProps>
           techniques={techniques}
           tactics={tactics}
           initialSelectedTechnique={selectedTechnique}
+          onDispatchSimulatedAlert={onSimulateAlert}
+          userRole={currentUser?.role}
         />
       ) : viewMode === 'analytics' ? (
         <SecurityAnalyticsView
@@ -570,6 +656,12 @@ export const SecurityEngineerDashboard: React.FC<SecurityEngineerDashboardProps>
         <ImprovementRecommendationsView
           recommendations={recommendations}
           onSelectTechniqueForDraft={handleDraftRuleForTechnique}
+          currentUser={currentUser}
+          activeRecommendations={activeRecommendations}
+          onSubmitRecommendation={onSubmitRecommendation}
+          onUpdateImplementation={onUpdateRecommendationImplementation}
+          availableDrafts={drafts}
+          onRefreshActiveRecommendations={onRefreshRecommendations}
         />
       ) : filteredTechniques.length === 0 ? (
         <div className="p-12 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-lg text-center space-y-3 shadow-xs">
@@ -869,12 +961,60 @@ export const SecurityEngineerDashboard: React.FC<SecurityEngineerDashboardProps>
                   </div>
                 </div>
 
-                {/* Mapped Mitigations */}
+                {/* Mapped Mitigations & Unmitigated Gaps */}
                 <div className="space-y-2">
-                  <span className="text-[10px] font-mono text-slate-500 dark:text-slate-400 uppercase block font-bold">
-                    Mapped Defensive Mitigations ({selectedTechnique.mitigationIds.length})
-                  </span>
-                  {selectedTechnique.mitigationIds.length === 0 ? (
+                  <div className="flex items-center justify-between">
+                    <span className="text-[10px] font-mono text-slate-500 dark:text-slate-400 uppercase block font-bold">
+                      {secEngKnowledgeLookup
+                        ? `Defensive Mitigations (${secEngKnowledgeLookup.mitigations.length})`
+                        : `Mapped Defensive Mitigations (${selectedTechnique.mitigationIds.length})`}
+                    </span>
+                    {secEngKnowledgeLookup && (
+                      <span className="text-[9px] font-mono px-1.5 py-0.2 rounded bg-cyan-950 text-cyan-300 border border-cyan-800">
+                        public.security_engineer_knowledge
+                      </span>
+                    )}
+                  </div>
+
+                  {secEngKnowledgeLookup ? (
+                    secEngKnowledgeLookup.mitigations.length > 0 ? (
+                      <div className="space-y-1.5 max-h-48 overflow-y-auto pr-1">
+                        {secEngKnowledgeLookup.mitigations.map((m) => (
+                          <div
+                            key={m.id}
+                            className="p-2 bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 rounded text-[11px] space-y-0.5"
+                          >
+                            <div className="flex items-center justify-between text-blue-700 dark:text-cyan-300 font-mono font-semibold">
+                              <span>
+                                {m.id}: {m.name}
+                              </span>
+                              <a
+                                href={`https://attack.mitre.org/mitigations/${m.id}/`}
+                                target="_blank"
+                                rel="noreferrer"
+                                className="text-[10px] text-slate-500 hover:text-blue-600 dark:text-slate-400 dark:hover:text-cyan-300 flex items-center gap-0.5"
+                              >
+                                MITRE <ExternalLink className="w-2.5 h-2.5" />
+                              </a>
+                            </div>
+                            <p className="text-slate-600 dark:text-slate-400 text-[10px] leading-normal">
+                              {m.description}
+                            </p>
+                          </div>
+                        ))}
+                      </div>
+                    ) : (
+                      <div className="p-3 bg-rose-50/70 dark:bg-rose-950/40 border border-rose-200 dark:border-rose-900/60 rounded-md space-y-1">
+                        <div className="flex items-center gap-1.5 text-xs font-semibold text-rose-700 dark:text-rose-300">
+                          <AlertTriangle className="w-3.5 h-3.5 text-rose-600 dark:text-rose-400" />
+                          Unmitigated Coverage Gap
+                        </div>
+                        <p className="text-[10px] text-slate-600 dark:text-slate-400 leading-normal">
+                          This ATT&CK technique has no documented mitigations mapped in public.security_engineer_knowledge (part of the 111 verified unmitigated gaps).
+                        </p>
+                      </div>
+                    )
+                  ) : selectedTechnique.mitigationIds.length === 0 ? (
                     <p className="text-slate-500 italic text-[11px] p-2 bg-slate-50 dark:bg-slate-950 rounded border border-slate-200 dark:border-slate-800">
                       No mitigations mapped in current reference baseline.
                     </p>
@@ -913,6 +1053,30 @@ export const SecurityEngineerDashboard: React.FC<SecurityEngineerDashboardProps>
                     </div>
                   )}
                 </div>
+
+                {/* ATT&CK Graph Relationships (Distinguished from Application Alert IDs) */}
+                {secEngKnowledgeLookup && secEngKnowledgeLookup.relationships.length > 0 && (
+                  <div className="p-3 bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 rounded-lg space-y-2">
+                    <span className="text-[10px] font-mono text-slate-500 dark:text-slate-400 uppercase font-bold block">
+                      ATT&CK Relationship Endpoints ({secEngKnowledgeLookup.relationships.length})
+                    </span>
+                    <span className="text-[10px] text-slate-500 dark:text-slate-400 block italic">
+                      Taxonomy graph endpoints (addressed_source_id / addressed_target_id) — distinct from Alert IDs.
+                    </span>
+                    <div className="space-y-1 max-h-32 overflow-y-auto">
+                      {secEngKnowledgeLookup.relationships.map((rel, idx) => (
+                        <div
+                          key={idx}
+                          className="p-1.5 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded text-[10px] font-mono flex items-center justify-between"
+                        >
+                          <span className="text-blue-600 dark:text-cyan-400">{rel.sourceId || 'Source'}</span>
+                          <span className="text-slate-400">→ [{rel.mappingType || 'mitigates'}] →</span>
+                          <span className="text-emerald-600 dark:text-emerald-400">{rel.targetId || 'Target'}</span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
 
                 {/* External MITRE Link */}
                 <div className="pt-2 border-t border-slate-200 dark:border-slate-800">

@@ -1,11 +1,15 @@
 import React, { useState, useMemo } from 'react';
 import { SecurityAlert, AlertStatus } from '../../types/alert';
 import { MitreTechnique, MitreMitigation } from '../../types/mitre';
-import { ResponseActionType } from '../../types/audit';
-import { UserRole } from '../../types/auth';
+import { ResponseActionType, IncidentTask } from '../../types/audit';
+import { UserRole, UserProfile } from '../../types/auth';
 import { DeterministicTriageRecommendation } from '../../types/triage';
 import { ProvenanceBadge } from '../common/ProvenanceBadge';
 import { Button } from '../common/Button';
+import { formatAttackIdDisplay, normalizeAttackId } from '../../utils/mitreUtils';
+import { SocAnalystKnowledgeRecord } from '../../services/knowledgeService';
+import { lookupSocAnalystKnowledgeForTechnique } from '../../services/relationshipService';
+import { CreateTaskModal } from './CreateTaskModal';
 import {
   Search,
   AlertOctagon,
@@ -24,7 +28,19 @@ import {
   AlertTriangle,
   History,
   BookOpen,
+  FileSearch,
+  ShieldAlert,
+  ClipboardList,
+  RefreshCw,
+  CheckSquare,
 } from 'lucide-react';
+import { RequestReworkModal } from './RequestReworkModal';
+import { ApproveRemediationModal } from './ApproveRemediationModal';
+import {
+  getTaskReviewState,
+  parseRemediationHistory,
+  checkAlertClosureEligibility,
+} from '../../utils/remediationReview';
 
 interface InvestigationWorkspaceProps {
   alerts: SecurityAlert[];
@@ -40,6 +56,11 @@ interface InvestigationWorkspaceProps {
   onNavigateToAlertQueue: () => void;
   onNavigateToAuditTrail?: (alertId?: string) => void;
   onNavigateToPlaybooks?: (alertId?: string) => void;
+  socKnowledge?: SocAnalystKnowledgeRecord[];
+  tasks?: IncidentTask[];
+  currentUser?: UserProfile;
+  onCreateTask?: (taskData: Omit<IncidentTask, 'id' | 'createdAt'>) => Promise<IncidentTask>;
+  onReviewTask?: (taskId: string, decision: 'approved' | 'rework_requested', notes: string) => Promise<void>;
 }
 
 export const InvestigationWorkspace: React.FC<InvestigationWorkspaceProps> = ({
@@ -56,6 +77,11 @@ export const InvestigationWorkspace: React.FC<InvestigationWorkspaceProps> = ({
   onNavigateToAlertQueue,
   onNavigateToAuditTrail,
   onNavigateToPlaybooks,
+  socKnowledge = [],
+  tasks = [],
+  currentUser,
+  onCreateTask,
+  onReviewTask,
 }) => {
   const [activeAlertId, setActiveAlertId] = useState<string>(
     selectedAlertId || (alerts.length > 0 ? alerts[0].id : '')
@@ -63,11 +89,19 @@ export const InvestigationWorkspace: React.FC<InvestigationWorkspaceProps> = ({
   const [newNote, setNewNote] = useState('');
   const [isSubmittingNote, setIsSubmittingNote] = useState(false);
   const [isUpdatingStatus, setIsUpdatingStatus] = useState(false);
+  const [isCreateTaskModalOpen, setIsCreateTaskModalOpen] = useState(false);
+  const [selectedTaskForRework, setSelectedTaskForRework] = useState<IncidentTask | null>(null);
+  const [selectedTaskForApproval, setSelectedTaskForApproval] = useState<IncidentTask | null>(null);
+  const [closureBlockedMessage, setClosureBlockedMessage] = useState<string | null>(null);
 
   // Active alert object
   const currentAlert = useMemo(() => {
     return alerts.find((a) => a.id === activeAlertId) || alerts[0] || null;
   }, [alerts, activeAlertId]);
+
+  const linkedTasks = useMemo(() => {
+    return (tasks || []).filter((t) => t.associatedAlertId === currentAlert?.id);
+  }, [tasks, currentAlert?.id]);
 
   // Synchronize internal active alert state whenever external selectedAlertId updates
   React.useEffect(() => {
@@ -75,6 +109,13 @@ export const InvestigationWorkspace: React.FC<InvestigationWorkspaceProps> = ({
       setActiveAlertId(selectedAlertId);
     }
   }, [selectedAlertId, alerts]);
+
+  // Derived ATT&CK Technique ID & Knowledge
+  const attackId = currentAlert?.attack_id || normalizeAttackId(currentAlert?.mitreTechniqueId);
+  const socTechniqueKnowledge = useMemo(() => {
+    if (!attackId || !socKnowledge || socKnowledge.length === 0) return null;
+    return lookupSocAnalystKnowledgeForTechnique(attackId, socKnowledge);
+  }, [attackId, socKnowledge]);
 
   // Derived MITRE Technique
   const currentTechnique = useMemo(() => {
@@ -104,9 +145,23 @@ export const InvestigationWorkspace: React.FC<InvestigationWorkspaceProps> = ({
 
   const handleStatusChange = async (newStatus: AlertStatus) => {
     if (!currentAlert || isUpdatingStatus) return;
+    setClosureBlockedMessage(null);
+
+    // Requirement 7: When an alert has associated remediation tasks, require all of them
+    // to have explicit SOC Analyst approval before allowing the alert to become resolved.
+    if (newStatus === 'resolved') {
+      const eligibility = checkAlertClosureEligibility(currentAlert.id, tasks || []);
+      if (!eligibility.eligible) {
+        setClosureBlockedMessage(eligibility.reason || 'All associated remediation tasks must be approved by a SOC Analyst before this alert can be resolved.');
+        return;
+      }
+    }
+
     setIsUpdatingStatus(true);
     try {
       await onUpdateStatus(currentAlert.id, newStatus);
+    } catch (err: any) {
+      setClosureBlockedMessage(err.message || 'Failed to update alert status.');
     } finally {
       setIsUpdatingStatus(false);
     }
@@ -305,22 +360,105 @@ export const InvestigationWorkspace: React.FC<InvestigationWorkspaceProps> = ({
           </div>
 
           {/* MITRE ATT&CK Mapping & Mitigations */}
-          {currentTechnique && (
+          {(socTechniqueKnowledge || currentTechnique) && (
             <div className="bg-slate-900 border border-slate-800 rounded-lg p-5 space-y-4">
               <div className="flex items-center justify-between">
                 <h3 className="text-xs font-semibold text-slate-200 flex items-center gap-2">
                   <Layers className="w-4 h-4 text-blue-400" />
                   MITRE ATT&CK Correlation
+                  {socTechniqueKnowledge && (
+                    <span className="text-[10px] font-mono text-cyan-400 bg-cyan-950/80 px-1.5 py-0.2 rounded border border-cyan-800">
+                      public.soc_analyst_knowledge
+                    </span>
+                  )}
                 </h3>
                 <span className="font-mono text-xs text-blue-400 font-bold bg-blue-950 px-2 py-0.5 rounded border border-blue-900">
-                  {currentTechnique.id}
+                  {formatAttackIdDisplay(attackId || currentTechnique?.id)}
                 </span>
               </div>
 
               <div>
-                <h4 className="text-sm font-semibold text-slate-100">{currentTechnique.name}</h4>
-                <p className="text-xs text-slate-400 mt-1">{currentTechnique.description}</p>
+                <h4 className="text-sm font-semibold text-slate-100">
+                  {socTechniqueKnowledge?.techniqueName || currentTechnique?.name}
+                </h4>
+                <p className="text-xs text-slate-400 mt-1">
+                  {socTechniqueKnowledge?.techniqueDescription || currentTechnique?.description}
+                </p>
+                <div className="pt-2 flex flex-wrap gap-2 text-[10px] font-mono text-slate-400">
+                  {socTechniqueKnowledge?.tactics.length ? (
+                    <span>Tactics: <strong className="text-slate-300">{socTechniqueKnowledge.tactics.join(', ')}</strong></span>
+                  ) : null}
+                  <span>Platforms: <strong className="text-slate-300">
+                    {socTechniqueKnowledge?.platforms.length
+                      ? socTechniqueKnowledge.platforms.join(', ')
+                      : currentTechnique?.platforms.join(', ') || 'Enterprise'}
+                  </strong></span>
+                </div>
               </div>
+
+              {/* Verified Detection Strategy */}
+              {socTechniqueKnowledge?.detectionStrategies.length ? (
+                <div className="p-3 bg-slate-950/80 rounded border border-slate-800 space-y-2">
+                  <span className="text-xs font-mono uppercase font-bold text-slate-300 flex items-center gap-1.5">
+                    <ShieldAlert className="w-3.5 h-3.5 text-cyan-400" />
+                    Verified Detection Strategies ({socTechniqueKnowledge.detectionStrategies.length})
+                  </span>
+                  <div className="space-y-1.5">
+                    {socTechniqueKnowledge.detectionStrategies.map((ds, idx) => (
+                      <div key={idx} className="p-2 bg-slate-900 border border-slate-800 rounded text-xs flex items-center justify-between">
+                        <span className="text-slate-200">{ds.name}</span>
+                        <span className="font-mono text-[10px] text-cyan-400 font-semibold">{ds.attackId}</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              ) : null}
+
+              {/* Behavioral Analytics & Log Sources */}
+              {socTechniqueKnowledge && (socTechniqueKnowledge.analytics.length > 0 || socTechniqueKnowledge.logSources.length > 0) && (
+                <div className="p-3 bg-slate-950/80 rounded border border-slate-800 space-y-2.5">
+                  <span className="text-xs font-mono uppercase font-bold text-emerald-400 flex items-center gap-1.5">
+                    <FileSearch className="w-3.5 h-3.5" />
+                    Reference Analytics & Log Sources
+                  </span>
+
+                  {socTechniqueKnowledge.analytics.length > 0 && (
+                    <div className="space-y-1">
+                      <span className="text-[10px] font-mono text-slate-400 uppercase block">
+                        Behavioral Analytics:
+                      </span>
+                      <div className="flex flex-wrap gap-1">
+                        {socTechniqueKnowledge.analytics.map((an, idx) => (
+                          <span
+                            key={idx}
+                            className="px-1.5 py-0.5 rounded text-[10px] font-mono bg-emerald-950 text-emerald-300 border border-emerald-800"
+                          >
+                            {an.id}: {an.name}
+                          </span>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  {socTechniqueKnowledge.logSources.length > 0 && (
+                    <div className="space-y-1 pt-1 border-t border-slate-800/80">
+                      <span className="text-[10px] font-mono text-slate-400 uppercase block">
+                        Log Sources:
+                      </span>
+                      <div className="flex flex-wrap gap-1">
+                        {socTechniqueKnowledge.logSources.map((ls, idx) => (
+                          <span
+                            key={idx}
+                            className="px-1.5 py-0.5 rounded text-[10px] font-mono bg-slate-900 text-slate-300 border border-slate-800"
+                          >
+                            {ls}
+                          </span>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
 
               {currentMitigations.length > 0 && (
                 <div className="space-y-2 pt-2 border-t border-slate-800">
@@ -458,6 +596,17 @@ export const InvestigationWorkspace: React.FC<InvestigationWorkspaceProps> = ({
               Update status to reflect current operational workflow state:
             </p>
 
+            {/* Incident Closure Guard Alert */}
+            {closureBlockedMessage && (
+              <div className="p-3 bg-rose-950/80 border border-rose-800 rounded-lg text-xs text-rose-200 space-y-1">
+                <div className="flex items-center gap-2 font-semibold text-rose-300 font-mono text-[11px]">
+                  <AlertTriangle className="w-4 h-4 shrink-0" />
+                  <span>INCIDENT CLOSURE GUARD: RESOLUTION BLOCKED</span>
+                </div>
+                <p className="leading-relaxed pl-6">{closureBlockedMessage}</p>
+              </div>
+            )}
+
             <div className="grid grid-cols-2 gap-2">
               {(['new', 'in_triage', 'escalated', 'resolved', 'false_positive'] as AlertStatus[]).map((status) => (
                 <Button
@@ -512,6 +661,108 @@ export const InvestigationWorkspace: React.FC<InvestigationWorkspaceProps> = ({
             </div>
           </div>
 
+          {/* IT Operations Remediation Tasks Card */}
+          <div className="bg-slate-900 border border-slate-800 rounded-lg p-5 space-y-3">
+            <div className="flex items-center justify-between">
+              <h3 className="text-xs font-semibold text-slate-200 flex items-center gap-2">
+                <ClipboardList className="w-4 h-4 text-amber-400" />
+                Response Tasks ({linkedTasks.length})
+              </h3>
+              {currentRole === 'soc_analyst' && onCreateTask && (
+                <Button
+                  size="xs"
+                  variant="outline"
+                  onClick={() => setIsCreateTaskModalOpen(true)}
+                  className="text-amber-300 border-amber-900/60 hover:bg-amber-950/40 text-[11px] flex items-center gap-1"
+                >
+                  <ClipboardList className="w-3 h-3 text-amber-400" />
+                  Create Task
+                </Button>
+              )}
+            </div>
+            <p className="text-[11px] text-slate-400">
+              Assigned remediation tasks for IT Operations linked to {currentAlert.id}:
+            </p>
+
+            {linkedTasks.length === 0 ? (
+              <p className="text-xs text-slate-500 italic p-3 bg-slate-950/50 rounded border border-slate-800">
+                No remediation tasks dispatched for this alert yet.
+              </p>
+            ) : (
+              <div className="space-y-2.5">
+                {linkedTasks.map((t) => {
+                  const reviewState = getTaskReviewState(t);
+                  return (
+                    <div key={t.id} className="p-3 bg-slate-950/70 border border-slate-800 rounded-lg text-xs space-y-2">
+                      <div className="flex items-center justify-between">
+                        <span className="font-mono font-bold text-amber-400">{t.id}</span>
+                        <div className="flex items-center gap-1.5">
+                          <span className={`text-[9px] font-mono uppercase px-1.5 py-0.5 rounded font-bold border ${reviewState.badgeClass}`}>
+                            {reviewState.label}
+                          </span>
+                          <span className="text-[9px] font-mono uppercase px-1.5 py-0.2 rounded font-bold bg-amber-950 text-amber-300">
+                            {t.priority}
+                          </span>
+                        </div>
+                      </div>
+                      <div className="font-medium text-slate-200 text-xs">{t.title}</div>
+                      <div className="text-[10px] font-mono text-slate-400 flex items-center justify-between">
+                        <span>Target: <strong className="text-slate-300">{t.targetAsset}</strong></span>
+                        <span>Role: {t.assignedRole}</span>
+                      </div>
+
+                      {/* If rework instructions exist */}
+                      {reviewState.status === 'rework_requested' && reviewState.latestReworkInstructions && (
+                        <div className="p-2 bg-orange-950/30 border border-orange-800/60 rounded text-[10px] text-orange-300 font-mono space-y-0.5">
+                          <span className="font-bold uppercase flex items-center gap-1">
+                            <RefreshCw className="w-2.5 h-2.5" />
+                            Rework Instructions Sent:
+                          </span>
+                          <p className="line-clamp-2">{reviewState.latestReworkInstructions}</p>
+                        </div>
+                      )}
+
+                      {/* If approved */}
+                      {reviewState.status === 'approved' && (
+                        <div className="p-2 bg-emerald-950/30 border border-emerald-800/60 rounded text-[10px] text-emerald-300 font-mono flex items-center gap-1.5">
+                          <CheckCircle2 className="w-3 h-3 text-emerald-400 shrink-0" />
+                          <span>Remediation approved by {reviewState.latestReview?.reviewerName || 'Analyst'}</span>
+                        </div>
+                      )}
+
+                      {/* Action buttons if awaiting review */}
+                      {currentRole === 'soc_analyst' && onReviewTask && reviewState.canApprove && (
+                        <div className="pt-2 border-t border-slate-800 flex items-center justify-between gap-1.5">
+                          <span className="text-[10px] font-mono text-purple-300">Review Decision:</span>
+                          <div className="flex items-center gap-1.5">
+                            <Button
+                              size="xs"
+                              variant="outline"
+                              onClick={() => setSelectedTaskForRework(t)}
+                              className="text-orange-300 border-orange-800 hover:bg-orange-950 text-[10px] py-0.5 px-2 font-mono"
+                            >
+                              <RefreshCw className="w-2.5 h-2.5 mr-1" />
+                              Rework
+                            </Button>
+                            <Button
+                              size="xs"
+                              variant="primary"
+                              onClick={() => setSelectedTaskForApproval(t)}
+                              className="bg-emerald-600 hover:bg-emerald-500 text-white text-[10px] py-0.5 px-2 font-mono"
+                            >
+                              <CheckCircle2 className="w-2.5 h-2.5 mr-1" />
+                              Approve
+                            </Button>
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+
           {/* Response Playbooks Deep-Link */}
           {onNavigateToPlaybooks && (
             <div className="bg-slate-900 border border-slate-800 rounded-lg p-4 space-y-2">
@@ -557,6 +808,45 @@ export const InvestigationWorkspace: React.FC<InvestigationWorkspaceProps> = ({
           )}
         </div>
       </div>
+
+      {/* Create Task Modal */}
+      {onCreateTask && currentAlert && (
+        <CreateTaskModal
+          isOpen={isCreateTaskModalOpen}
+          onClose={() => setIsCreateTaskModalOpen(false)}
+          alert={currentAlert}
+          currentUser={currentUser || { id: 'usr-analyst-01', name: 'Analyst', email: '', role: currentRole, callsign: 'ANALYST', title: 'SOC Analyst' }}
+          onCreateTask={onCreateTask}
+        />
+      )}
+
+      {/* Request Rework Modal */}
+      {selectedTaskForRework && onReviewTask && (
+        <RequestReworkModal
+          isOpen={Boolean(selectedTaskForRework)}
+          onClose={() => setSelectedTaskForRework(null)}
+          task={selectedTaskForRework}
+          currentUser={currentUser || { id: 'usr-analyst-01', name: 'Analyst', email: '', role: currentRole, callsign: 'ANALYST', title: 'SOC Analyst' }}
+          onSubmitRework={async (taskId, instructions) => {
+            await onReviewTask(taskId, 'rework_requested', instructions);
+            setSelectedTaskForRework(null);
+          }}
+        />
+      )}
+
+      {/* Approve Remediation Modal */}
+      {selectedTaskForApproval && onReviewTask && (
+        <ApproveRemediationModal
+          isOpen={Boolean(selectedTaskForApproval)}
+          onClose={() => setSelectedTaskForApproval(null)}
+          task={selectedTaskForApproval}
+          currentUser={currentUser || { id: 'usr-analyst-01', name: 'Analyst', email: '', role: currentRole, callsign: 'ANALYST', title: 'SOC Analyst' }}
+          onConfirmApproval={async (taskId, notes) => {
+            await onReviewTask(taskId, 'approved', notes || '');
+            setSelectedTaskForApproval(null);
+          }}
+        />
+      )}
     </div>
   );
 };

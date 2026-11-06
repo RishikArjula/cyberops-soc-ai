@@ -85,14 +85,14 @@ export const AppHeader: React.FC<AppHeaderProps> = ({
           <div>
             <div className="flex items-center gap-2">
               <span className="font-heading font-bold tracking-wider text-sm text-slate-900 dark:text-slate-100">
-                CYBEROPS SOC
+                KRYPTRION
               </span>
               <span className="text-[10px] font-mono px-1.5 py-0.2 bg-slate-100 dark:bg-cyan-950 text-slate-700 dark:text-cyan-400 border border-slate-200 dark:border-cyan-800 rounded">
                 SECURE WORKSPACE
               </span>
             </div>
             <p className="text-[10px] text-slate-500 dark:text-slate-400 leading-none font-sans">
-              Operational Incident Platform
+              AI Security Operations Platform
             </p>
           </div>
         </div>

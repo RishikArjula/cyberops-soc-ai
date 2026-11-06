@@ -37,9 +37,13 @@ export type Permission =
   | 'action:authorize_simulated'
   | 'audit:read'
   | 'audit:export'
-  | 'telemetry:read'
   | 'platform:admin'
-  | 'platform:health_read';
+  | 'platform:health_read'
+  | 'recommendation:create'
+  | 'recommendation:read'
+  | 'recommendation:review'
+  | 'recommendation:update'
+  | 'recommendation:validate';
 
 export const ROLE_PERMISSIONS: Record<UserRole, Permission[]> = {
   soc_analyst: [
@@ -50,9 +54,12 @@ export const ROLE_PERMISSIONS: Record<UserRole, Permission[]> = {
     'notes:read_private',
     'mitre:read',
     'incident:read',
+    'incident:update',
     'action:propose',
     'audit:read',
-    'telemetry:read',
+    'recommendation:read',
+    'recommendation:review',
+    'recommendation:validate',
   ],
   security_engineer: [
     'alert:read',
@@ -60,7 +67,9 @@ export const ROLE_PERMISSIONS: Record<UserRole, Permission[]> = {
     'mitre:analyze_coverage',
     'incident:read',
     'audit:read',
-    'telemetry:read',
+    'recommendation:create',
+    'recommendation:read',
+    'recommendation:update',
   ],
   it_operations: [
     'alert:read_scoped_only',
@@ -68,7 +77,6 @@ export const ROLE_PERMISSIONS: Record<UserRole, Permission[]> = {
     'incident:update',
     'action:authorize_simulated',
     'audit:read',
-    'telemetry:read',
   ],
   // Super Admin: Platform administration ONLY. Explicitly isolated from private SOC alerts and investigation notes!
   super_admin: [

@@ -11,7 +11,43 @@ dotenv.config();
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-import { createCopilotRouter, CopilotRouterOptions } from './src/server/ai/copilotRouter';
+import type { CopilotRouterOptions } from './src/server/ai/copilotRouter';
+
+// Ensure TypeScript ESM execution:
+// If invoked via bare `node server.ts` (such as in Cloud Run production container),
+// re-execute with `--import tsx` so extensionless TypeScript module specifiers resolve properly.
+const isTsxActive = Boolean(
+  process.env.__TSX_BOOTSTRAPPED__ ||
+  process.execArgv.some((arg) => arg.includes('tsx')) ||
+  process.env.npm_lifecycle_script?.includes('tsx')
+);
+
+if (!isTsxActive && process.env.NODE_ENV !== 'test') {
+  const { spawn } = await import('node:child_process');
+  const child = spawn(process.execPath, ['--import', 'tsx', ...process.argv.slice(1)], {
+    stdio: 'inherit',
+    env: { ...process.env, __TSX_BOOTSTRAPPED__: '1' },
+  });
+
+  child.on('exit', (code, signal) => {
+    if (signal) {
+      process.kill(process.pid, signal);
+    } else {
+      process.exit(code ?? 0);
+    }
+  });
+
+  const forwardSignal = (sig: NodeJS.Signals) => {
+    if (!child.killed) {
+      child.kill(sig);
+    }
+  };
+  process.on('SIGTERM', () => forwardSignal('SIGTERM'));
+  process.on('SIGINT', () => forwardSignal('SIGINT'));
+
+  // Suspend this parent process while the bootstrapped child executes
+  await new Promise(() => {});
+}
 
 /**
  * Determine the runtime port cleanly:
@@ -74,6 +110,7 @@ export async function createServer(options?: CreateServerOptions): Promise<Serve
   });
 
   // Mount AI Copilot router under /api/copilot
+  const { createCopilotRouter } = await import('./src/server/ai/copilotRouter');
   const copilotRouter = createCopilotRouter(options?.copilotOptions);
   apiRouter.use('/copilot', copilotRouter);
 
